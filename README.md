@@ -1,2 +1,4 @@
 # decentra-chat
-A true decentralised chat for the people
+A true decentralized chat for the people.
+
+1. Read the proposal [here](PAPER.md)
