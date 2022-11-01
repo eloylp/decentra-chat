@@ -207,7 +207,7 @@ protocol "type(4):4, uuid(128):128, prev hash(256): 256, timestamp(32):32, sourc
 
 * `uuid` field its an [UUID](https://www.rfc-editor.org/rfc/rfc4122.html) v4 that needs to be added to every message by the application, so previous messages can be easy referenced and found later.
 
-* `prev hash` field will be the SHA256 sum of the last acknowledged message in the conversation.
+* `prev hash` field will be the SHA256 sum of the last acknowledged message in the conversation. In case this is the first message of the conversation, this field will be filled with zeroes. 
 
 * `timestamp` field is an unsigned four-octet number containing the number of seconds elapsed since midnight, 1 January 1970 UTC. Represents the moment of the message signing, which should be close to the send time.
 
