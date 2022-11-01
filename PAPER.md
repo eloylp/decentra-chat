@@ -243,7 +243,7 @@ Each peer should always verify all the received messages. Multiple verifications
 
 2. The `timestamp` should not be too in the past nor in the future. We cannot provide accurate measurements here, but should work in a best effort way. Like having a threshold of seconds to determine if the message is in the right range of time.
 
-3. The `UUID` should be present in the message header.
+3. A correct [UUID](https://www.rfc-editor.org/rfc/rfc4122.html) should be present in the message.
 
 4. The standard expected `PGP` message content decryption and verification. The `data` field of the DC message contains the `PGP` message.
 
