@@ -12,15 +12,15 @@ It could make use other protocols to extend the peer discovery operation to the 
 
 DC would make use of asymmetric cryptography for authentication, non repudiation and encryption of messages. [Hybrid encryption](https://en.wikipedia.org/wiki/Hybrid_cryptosystem) modes will be encouraged for performance reasons.
 
-All the messages in DC are going to be public by nature. That doesn't mean everyone can read them. They will be encrypted with high cryptographic standards.
+All the messages in DC are going to be public by nature. That doesn't mean everyone can read them. They will be encrypted with strong cryptographic standards.
 
 A decentralized blockchain which backs messages could be studied in further iterations. The current design should take that possibility into account. At the time of this write, the `message` will represent the main unit work among `peers`, which will be each application.
 
-With DC people will have true ownership regarding communications. It will introduce strong end to end encryption, non-repudiation and decentralization. The idea that each message would be signed by peers favours the use of DC for as an example, make deals and have a proof of acceptance of the involved parts, even if there is no internet.
+With DC people will have true ownership regarding communications. It will introduce strong end to end encryption, non-repudiation and decentralization. The idea that each message would be signed by peers favours the use of DC for, as an example, make deals and have a proof of acceptance of the involved parts, even if there is no internet.
 
 ## The protocol
 
-Following sections will explain the DC protocol. DC will use chat mechanics for communication, but will make use of the known [PGP](https://www.rfc-editor.org/rfc/rfc4880) standard for message payload compression, encryption, signing and authentication. This would also make DC able to import existing GPG keys already in use in many emails systems.
+Following sections will explain the DC protocol. DC will use chat mechanics for communication, but will make use of the known [PGP](https://www.rfc-editor.org/rfc/rfc4880) standard for message payload compression, encryption, signing and authentication. This would also make DC able to import existing GPG keys already in use by many emails systems.
 
 ### Peer discovery (LAN)
 
@@ -83,7 +83,7 @@ Then we have the variable length fields `nick` and `version`.
 
 This operation may take place just before of sending the first message to a peer, which was previously detected by the discovery system (see above section).
 
-This operation will take place only if the application cannot find an existing public key that matches the `key fingerprint` obtained during the `discovery operation`. In that case, the application will add it to its database for future use.
+This operation will take place only if the application cannot find an existing public key which matches the `key fingerprint` obtained during the `discovery operation`. In that case, the application will add it to its database for future use.
 
 
 This is will be the request message that peers should send to each other.
@@ -100,7 +100,7 @@ protocol "type(4):4"
 * The `type` field value of this message will be the unsigned integer `2`.
 
 
-This is will be the response message that peers should send back to each other.
+This will be the response message that peers should send back to each other.
 
 ```bash
 protocol "type(4):4, key len(16):16, key data:76"
@@ -122,7 +122,7 @@ protocol "type(4):4, key len(16):16, key data:76"
 
 ### Message
 
-The message format that peers will send to each other:
+The message format that peers will send to each other in a conversation:
 
 ```bash
 protocol "type(4):4, uuid(128):128, prev hash(256): 256, timestamp(32):32, source(256):256,destination(256):256, headers len(16):16, headers:44, data len(32):32, data:28, signature len(16):16, signature:52"
@@ -205,7 +205,7 @@ protocol "type(4):4, uuid(128):128, prev hash(256): 256, timestamp(32):32, sourc
 
 * `type` field for this message will be the unsigned integer `4`.
 
-* `uuid` field its an [UUID](https://www.rfc-editor.org/rfc/rfc4122.html) v4 that needs to be added to every message by the application, so previous messages can be easy referenced and found later.
+* `uuid` field its an [UUID](https://www.rfc-editor.org/rfc/rfc4122.html) v4 that needs to be added to every message by the application, so previous messages can be easily referenced and found later.
 
 * `prev hash` field will be the SHA256 sum of the last acknowledged message in the conversation. In case this is the first message of the conversation, this field will be filled with zeroes. 
 
@@ -251,7 +251,7 @@ Each peer should always verify all the received messages. Multiple verifications
 
 With this verification scheme (peers), users should be naturally motivated to have their system clocks properly adjusted, as no legitimate user would like to accept invalid messages.
 
-We assume the clocks in both systems are more or less aligned. But its true that we would be relaying a bit in local clocks, which are depending on centralized infrastructure when syncing.
+We assume the clocks in both systems are more or less aligned. But its true that we would be relaying a bit in local clocks, which are depending on centralized infrastructure when syncing. This is also mitigated by message chaining (see `prev hash` field in message definition).
 
 Messages exceeding the configured time window or breaking any other validation should be logged, dropped and not presented to the user.
 
@@ -373,7 +373,7 @@ Its also interesting to develop ways to interact with Open PGP public keys serve
 
 We proposed a decentralized chat system that would take all the benefits from current open source cryptography
 standards, being able to ensure encryption and non repudiation. It also brings a solution for acknowledging
-messages both, at machine level and human level. As long as the peers have a connection among them, they can continue exchanging messages.
+messages both, at machine level and human level. As long as the peers have a digital connection among them, they can continue exchanging messages.
 
 
 ## Resources
