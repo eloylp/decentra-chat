@@ -241,7 +241,7 @@ Each peer should always verify all the received messages. Multiple verifications
 
 1. The signature verification at DC message level. It should replay the signature hashing process (see Message section) and compare the resultant hash with the signature one, which should be decrypted with the sender public key.
 
-2. The `timestamp` should not be too in the past nor in the future. Of course, we cannot provide accurate measurements here, but should work in a best effort way.
+2. The `timestamp` should not be too in the past nor in the future. We cannot provide accurate measurements here, but should work in a best effort way. Like having a threshold of seconds to determine if the message is in the right range of time.
 
 3. The `UUID` should be present in the message header.
 
