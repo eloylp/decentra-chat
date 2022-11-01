@@ -251,9 +251,15 @@ Each peer should always verify all the received messages. Multiple verifications
 
 With this verification scheme (peers), users should be naturally motivated to have their system clocks properly adjusted, as no legitimate user would like to accept invalid messages.
 
-We assume the clocks in both systems are more or less aligned. But its true that we would be relaying a bit in local clocks, which are depending on centralized infrastructure when syncing. This is also mitigated by message chaining (see `prev hash` field in message definition).
+We assume the clocks in both systems are more or less aligned. But its true that we would be relaying a bit in local clocks, which are depending on centralized infrastructure when syncing.
 
 Messages exceeding the configured time window or breaking any other validation should be logged, dropped and not presented to the user.
+
+### Message ordering and time accuracy
+
+Ordering of messages is achieved by the `prev hash` field of the message. 
+
+The accuracy of the `timestamp` field of the message should not be used to determine message order, but to have an idea around when that message was sent. As commented in the `message verification process`, it should be accurate enough for proving a human conversation.
 
 ### Message acknowledgement
 
