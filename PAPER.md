@@ -69,7 +69,7 @@ Lets describe the multiple parts:
 
 * The `type` field will indicate the message type, its an unsigned integer, which in this case will be `1` (discovery).
 
-* The `address` field and `port` fields will indicate each peer how to contact each other.
+* The `address` (ipv4) field and `port` fields will indicate each peer how to contact each other.
 
 Then we have the variable length fields `nick` and `version`.
 
