@@ -223,6 +223,7 @@ protocol "type(4):4, uuid(128):128, prev hash(256): 256, timestamp(32):32, sourc
 
 ```bash
 uuid
+prev_hash
 timestamp
 source
 destination
