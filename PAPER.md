@@ -6,7 +6,9 @@ DecentraChat (in advance DC) aims to be a pure decentralized chat for the people
 
 Nowadays internet communications are completely centralized. This centralization its not only technical, but organizational. Big companies own all the data. Their algorithms prioritize arbitrary information in favour of their own _interests_. Its time to create a fully open source proposal to address this problem by omitting all centralized entities.
 
-DC would work in a variety of conditions. Its not assumed the internet will be there for us. We can think on Ethernet networks. Even p2p Bluetooth. Multiple communication mediums should be taken into account as possible alternative transports. It could make use other protocols to extend the peer discovery protocols to the entire internet.
+DC would work in a variety of conditions. Its not assumed the internet will be there for us. We can think on Ethernet networks, even p2p Bluetooth. Multiple communication mediums should be taken into account as possible alternative transports. DC should develop the proper code infrastructure in order to allow the extension of such transports by the community.
+
+It could make use other protocols to extend the peer discovery operation to the entire internet.
 
 DC would make use of asymmetric cryptography for authentication, non repudiation and encryption of messages. [Hybrid encryption](https://en.wikipedia.org/wiki/Hybrid_cryptosystem) modes will be encouraged for performance reasons.
 
