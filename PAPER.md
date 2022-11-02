@@ -26,7 +26,7 @@ Following sections will explain the DC protocol. DC will use chat mechanics for 
 
 Peers will use [IP multi-casting](https://datatracker.ietf.org/doc/html/rfc1112) in order to notify other peers their presence in the network.
 
-The first thing a `peer` will do when after starting the application is to join the multi-cast group `239.255.40.91` , as its located in the [Organization-Local Scope](https://www.ietf.org/rfc/rfc2365.txt) block in the [IANA address space](https://www.iana.org/assignments/multicast-addresses/multicast-addresses.xhtml).
+The first thing a `peer` will do after starting the application is to join the multi-cast group `239.255.40.91` , as its located in the [Organization-Local Scope](https://www.ietf.org/rfc/rfc2365.txt) block in the [IANA address space](https://www.iana.org/assignments/multicast-addresses/multicast-addresses.xhtml).
 
 Each peer will emit its multi-cast `UDP` announce packet at intervals of 5 seconds. Heres is the intended datagram:
 
@@ -61,7 +61,7 @@ protocol "type(4):4,address(32):32,port(16):16,nick len(7):7,nick:31,v len(6):6,
 |                                                               |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 ```
-The above datagram has a total max size of `4 + 32 + 16 + (2^7*8) + (2^6*8) + 256 = 1844 bits` (around 230 bytes) , which is lower regarding size from the [maximum UDP packet size](https://stackoverflow.com/a/35697810), which is `508 bytes`. So all the discovery information fits in the same packet of an unreliable transport like UDP.
+The above datagram has a total max size of `4 + 32 + 16 + (2^7*8) + (2^6*8) + 256 = 1844 bits` (around 230 bytes) , which is lower than the [maximum UDP packet size](https://stackoverflow.com/a/35697810), which is `508 bytes`. So all the discovery information fits in the same packet of an unreliable transport like UDP.
 
 Other protocols like [multicast dns](https://en.wikipedia.org/wiki/Multicast_DNS) could be taken into account.
 
@@ -86,7 +86,7 @@ This operation may take place just before of sending the first message to a peer
 This operation will take place only if the application cannot find an existing public key which matches the `key fingerprint` obtained during the `discovery operation`. In that case, the application will add it to its database for future use.
 
 
-This is will be the request message that peers should send to each other.
+This will be the request message that peers should send to each other.
 
 ```bash
 protocol "type(4):4"
@@ -100,7 +100,7 @@ protocol "type(4):4"
 * The `type` field value of this message will be the unsigned integer `2`.
 
 
-This will be the response message that peers should send back to each other.
+This will be the response message that peers should send back to each other:
 
 ```bash
 protocol "type(4):4, key len(16):16, key data:76"
@@ -120,7 +120,7 @@ protocol "type(4):4, key len(16):16, key data:76"
 
 * The `key data` field will host the public key which must be in [PEM format](https://en.wikipedia.org/wiki/Privacy-Enhanced_Mail) (PGP flavor). Once the key is received by a peer, it will store it in its database, associated with its `key fingerprint`, which is the sha256 hash of the public key.
 
-### Message
+### Message 
 
 The message format that peers will send to each other in a conversation:
 
@@ -211,7 +211,7 @@ protocol "type(4):4, uuid(128):128, prev hash(256): 256, timestamp(32):32, sourc
 
 * `timestamp` field is an unsigned four-octet number containing the number of seconds elapsed since midnight, 1 January 1970 UTC. Represents the moment of the message signing, which should be close to the send time.
 
-* `source` field is the SHA256 hash value of the sender public key. Creator of the message should add its public key fingerprint here.
+* `source` field is the SHA256 hash value of the sender public key.
 
 * `destination` field is the SHA256 hash value of the receiver public key.
 
@@ -238,26 +238,26 @@ Although [Open PGP message format](https://www.rfc-editor.org/rfc/rfc4880) stand
 
 ### Message verification process
 
-Each peer should always verify all the received messages. Multiple verifications should happen here per each message:
+Each peer should always verify all the received messages. Multiple verifications should happen per each message:
 
 1. The signature verification at DC message level. It should replay the signature hashing process (see Message section) and compare the resultant hash with the signature one, which should be decrypted with the sender public key.
 
-2. The `timestamp` should not be too in the past nor in the future. We cannot provide accurate measurements here, but should work in a best effort way. Like having a threshold of seconds to determine if the message is in the right range of time.
+2. The `timestamp` should not be too in the past nor in the future. We cannot provide accurate measurements here, it should work in a best effort way. Like having a threshold of seconds to determine if the message is in the right range of time.
 
 3. A correct [UUID](https://www.rfc-editor.org/rfc/rfc4122.html) should be present in the message.
 
-4. The standard expected `PGP` message content decryption and verification. The `data` field of the DC message contains the `PGP` message.
+4. The standard expected `PGP` message content decryption and verification, as the `data` field of the DC message contains the `PGP` message.
 
 
-With this verification scheme (peers), users should be naturally motivated to have their system clocks properly adjusted, as no legitimate user would like to accept invalid messages.
+With this verification scheme (among peers), users should be naturally motivated to have their system clocks properly adjusted, as no legitimate user would like to accept invalid messages.
 
-We assume the clocks in both systems are more or less aligned. But its true that we would be relaying a bit in local clocks, which are depending on centralized infrastructure when syncing.
+We assume the clocks in both systems are more or less aligned. But its true that we would be relaying a bit in local clocks, which are depending on centralized infrastructure when syncing. See `Message ordering and time accuracy` for more information.
 
 Messages exceeding the configured time window or breaking any other validation should be logged, dropped and not presented to the user.
 
 ### Message ordering and time accuracy
 
-Ordering of messages is achieved by the `prev hash` field of the message. 
+Ordering of messages is achieved by the `prev hash` field of the message.
 
 The accuracy of the `timestamp` field of the message should not be used to determine message order, but to have an idea around when that message was sent. As commented in the `message verification process`, it should be accurate enough for proving a human conversation.
 
@@ -348,7 +348,7 @@ Message reply refers to the ability for an user to mention, or reply a specific 
 of acceptance regarding a specific message. Lets see an example:
 
 1. Alice: Hey Bob ! i am thinking on selling my car. Would you accept it for 10k $ ?
-2. Alice: Please think about it :)
+2. Alice: Please, think about it :)
 3. Bob: Hey Alice, looks like a good deal. I accept it.
 
 In the above example, Bob its interested in accepting the offer. In order to do that, instructs the application to 
@@ -374,7 +374,6 @@ In future versions global discovery distributed systems based on the internet co
 
 Its also interesting to develop ways to interact with Open PGP public keys servers like [keyserver.ubuntu.com](keyserver.ubuntu.com) for gathering public keys.
 
-
 ## Conclusion
 
 We proposed a decentralized chat system that would take all the benefits from current open source cryptography
@@ -385,3 +384,4 @@ messages both, at machine level and human level. As long as the peers have a dig
 ## Resources
 
 Kudos to https://github.com/luismartingarcia/protocol for protocol message ASCII generator.
+
