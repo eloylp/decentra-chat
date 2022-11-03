@@ -374,12 +374,29 @@ In future versions global discovery distributed systems based on the internet co
 
 Its also interesting to develop ways to interact with Open PGP public keys servers like [keyserver.ubuntu.com](keyserver.ubuntu.com) for gathering public keys.
 
+### Message spreading (vision)
+
+With time, many applications would be available and reaching each other. The more users, the better.
+DC peers could implement a kind of [gossip protocol](https://en.wikipedia.org//wiki/Gossip_protocol) for spreading messages among 
+them, even if they are not the owners of the messages. Messages would finally arrive to their destination, stopping propagation. 
+Device to device communication transports would help making the spread exponential.
+
+Users of DC could choose to dedicate a limited amount of storage and network resources
+for spreading messages. As much resources they dedicate, the bigger spreaders they become. Ideally, a rewarding
+mechanism (by using crypto currencies) to compensate the use of resources should be developed. Rewards would also
+motivate people to build `spreader nodes` , that could just be placed in concurrent places and massively forward DC messages
+among peers in the area.
+
+Peers should maintain a local registry in order to optimize the spread of messages. i.e , a peer shouldn't send twice
+the same message to other peer while the spreading messages. In the same way, the spread protocol should be able to 
+detect if a peer already owns a message, so just update the registry accordingly. Such local registry should have a maximum 
+retention period, proportionally calculated from the amount of chosen dedicated storage resources.
+
 ## Conclusion
 
 We proposed a decentralized chat system that would take all the benefits from current open source cryptography
 standards, being able to ensure encryption and non repudiation. It also brings a solution for acknowledging
-messages both, at machine level and human level. As long as the peers have a digital connection among them, they can continue exchanging messages.
-
+messages both, at machine level and human level. As long as the peers have a digital connection among them, they can continue exchanging messages. Lastly, we also shared some visions in the ways the project could evolve, all of them directed to increase decentralized capabilities and peer connectivity.
 
 ## Resources
 
