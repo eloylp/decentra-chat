@@ -31,16 +31,16 @@ The first thing a `peer` will do after starting the application is to join the m
 Each peer will emit its multi-cast `UDP` announce packet at intervals of 5 seconds. Heres is the intended datagram:
 
 ```bash
-protocol "type(4):4,address(32):32,port(16):16,nick len(7):7,nick:31,v len(6):6,v:32,key fingerprint(256):256"
+protocol "type(4):4,v len(6):6, address(32):32,port(16):16,nick len(7):7,nick:31,v:32,key fingerprint(256):256"
 
  0                   1                   2                   3  
  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|type(4)|                      address(32)                      |
+|type(4)|  v len(6) |                 address(32)               |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|       |            port(16)           | nick len(7) |         |
+|                   |            port(16)           |nick len(7)|
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|                           nick                       |v len(6)|
+| |                             nick                            |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 |                               v                               |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
