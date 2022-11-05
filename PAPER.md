@@ -125,7 +125,7 @@ protocol "type(4):4, key len(16):16, key data:76"
 The message format that peers will send to each other in a conversation:
 
 ```bash
-protocol "type(4):4, uuid(128):128, prev hash(256): 256, timestamp(32):32, source(256):256,destination(256):256, headers len(16):16, headers:44, data len(32):32, data:28, signature len(16):16, signature:52"
+protocol "type(4):4, uuid(128):128, conv uuid(128):128, conv type(8):8, prev hash(256): 256, timestamp(32):32, source(256):256,destination(256):256, headers len(16):16, headers:44, data len(32):32, data:28, signature len(16):16, signature:52"
 
  0                   1                   2                   3  
  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
@@ -144,6 +144,14 @@ protocol "type(4):4, uuid(128):128, prev hash(256): 256, timestamp(32):32, sourc
 +                                                               +
 |                                                               |
 +                                                               +
+|                         conv uuid(128)                        |
++       +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|       |  conv type(8) |                                       |
++-+-+-+-+-+-+-+-+-+-+-+-+                                       +
+|                                                               |
++                                                               +
+|                                                               |
++                                                               +
 |                                                               |
 +                                                               +
 |                                                               |
@@ -153,11 +161,11 @@ protocol "type(4):4, uuid(128):128, prev hash(256): 256, timestamp(32):32, sourc
 |                                                               |
 +                                                               +
 |                         prev hash(256)                        |
-+       +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|       |                      timestamp(32)                    |
++                       +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                       |              timestamp(32)            |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|       |                                                       |
-+-+-+-+-+                                                       +
+|                       |                                       |
++-+-+-+-+-+-+-+-+-+-+-+-+                                       +
 |                                                               |
 +                                                               +
 |                                                               |
@@ -171,9 +179,9 @@ protocol "type(4):4, uuid(128):128, prev hash(256): 256, timestamp(32):32, sourc
 |                                                               |
 +                                                               +
 |                           source(256)                         |
-+       +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|       |                                                       |
-+-+-+-+-+                                                       +
++                       +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                       |                                       |
++-+-+-+-+-+-+-+-+-+-+-+-+                                       +
 |                                                               |
 +                                                               +
 |                                                               |
@@ -187,25 +195,30 @@ protocol "type(4):4, uuid(128):128, prev hash(256): 256, timestamp(32):32, sourc
 |                                                               |
 +                                                               +
 |                        destination(256)                       |
-+       +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|       |         headers len(16)       |                       |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+                       +
++                       +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                       |         headers len(16)       |       |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+       +
 |                             headers                           |
++               +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|               |                  data len(32)                 |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|                          data len(32)                         |
+|               |                      data                     |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|                          data                         |       |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|    signature len(16)  |                                       |
-+-+-+-+-+-+-+-+-+-+-+-+-+                                       +
+|       |        signature len(16)      |                       |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+                       +
 |                            signature                          |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-
++               +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|               |
++-+-+-+-+-+-+-+-+
 ```
 
 * `type` field for this message will be the unsigned integer `4`.
 
 * `uuid` field its an [UUID](https://www.rfc-editor.org/rfc/rfc4122.html) v4 that needs to be added to every message by the application, so previous messages can be easily referenced and found later.
+
+* `conv uuid` field its an [UUID](https://www.rfc-editor.org/rfc/rfc4122.html) v4 that needs to be added to every message by the application, so conversations, which can involve 2 or more peers, can be easily indexed identified.
+
+* `conv type` is an unsigned integer that represents the kind of conversation (private, public group, private group ...).
 
 * `prev hash` field will be the SHA256 sum of the last acknowledged message in the conversation. In case this is the first message of the conversation, this field will be filled with zeroes. 
 
