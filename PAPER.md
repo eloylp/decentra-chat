@@ -241,7 +241,11 @@ protocol "type(4):4, v len(6):6, uuid(128):128, conv uuid(128):128, conv type(8)
 * `signature` its a variable length field for hosting the signature of the whole message. The signature will be computed by putting the hashes of all relevant message fields together, separated by a line break. Here is an example of how the `message data block` would be:
 
 ```bash
+type
+v
 uuid
+conv uuid
+conv type
 prev_hash
 timestamp
 source
