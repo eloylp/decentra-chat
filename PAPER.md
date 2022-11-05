@@ -69,13 +69,13 @@ Lets describe the multiple parts:
 
 * The `type` field will indicate the message type, its an unsigned integer, which in this case will be `1` (discovery).
 
+* The `v` field represent the version of peer software which emitted the message. Incompatibilities should be detected here.
+
 * The `address` (ipv4) field and `port` fields will indicate each peer how to contact each other.
 
 Then we have the variable length fields `nick` and `version`.
 
 * The `nick` field will be the human readable name that peers will present to each other. It will be the `email` present in the public `PGP` key. No way of controlling duplicates here, but the users will have more information than the nickname in order to distinguish among peers, like `key fingerprints`. In order to make this more user friendly, users should be able to permanently associate `key fingerprints` with fixed nicknames.
-
-* The `v` (version) field will indicate the application version. If there are incompatibilities among peers, they should be detected at this point.
 
 * The `key fingerprint` is the `SHA256(pub_key_blob)` value. This will unequivocally identify a peer, in a similar way [SSH](https://www.rfc-editor.org/rfc/rfc4253) does with machines on the first connection, but in this case to associate `nickname` and `key fingerprint`. The `key fingerprint` field will be used lately by the application to know if a new `key exchange` operation is needed or not (see following sections).
 
@@ -103,20 +103,24 @@ protocol "type(4):4"
 This will be the response message that peers should send back to each other:
 
 ```bash
-protocol "type(4):4, key len(16):16, key data:76"
+protocol "type(4):4, v len(6):6, key len(16):16, key data:76"
 
  0                   1                   2                   3  
  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|type(4)|           key len(16)         |                       |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+                       +
+|type(4)|  v len(6) |           key len(16)         |           |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+           +
 |                                                               |
-+                            key data                           +
-|                                                               |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
++                                                               +
+|                            key data                           |
++           +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|           |
++-+-+-+-+-+-+
 ```
 
 * The `type` field value of this message will be the unsigned integer `3`.
+
+* The `v` field represent the version of peer software which emitted the message. Incompatibilities should be detected here.
 
 * The `key data` field will host the public key which must be in [PEM format](https://en.wikipedia.org/wiki/Privacy-Enhanced_Mail) (PGP flavor). Once the key is received by a peer, it will store it in its database, associated with its `key fingerprint`, which is the sha256 hash of the public key.
 
@@ -125,29 +129,29 @@ protocol "type(4):4, key len(16):16, key data:76"
 The message format that peers will send to each other in a conversation:
 
 ```bash
-protocol "type(4):4, uuid(128):128, conv uuid(128):128, conv type(8):8, prev hash(256): 256, timestamp(32):32, source(256):256,destination(256):256, headers len(16):16, headers:44, data len(32):32, data:28, signature len(16):16, signature:52"
+protocol "type(4):4, v len(6):6, uuid(128):128, conv uuid(128):128, conv type(8):8, prev hash(256): 256, timestamp(32):32, source(256):256,destination(256):256, headers len(16):16, headers:44, data len(32):32, data:28, signature len(16):16, signature:52"
 
  0                   1                   2                   3  
  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|type(4)|                                                       |
-+-+-+-+-+                                                       +
+|type(4)|  v len(6) |                                           |
++-+-+-+-+-+-+-+-+-+-+                                           +
 |                                                               |
 +                                                               +
 |                                                               |
 +                                                               +
 |                            uuid(128)                          |
-+       +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|       |                                                       |
-+-+-+-+-+                                                       +
++                   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                   |                                           |
++-+-+-+-+-+-+-+-+-+-+                                           +
 |                                                               |
 +                                                               +
 |                                                               |
 +                                                               +
 |                         conv uuid(128)                        |
-+       +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|       |  conv type(8) |                                       |
-+-+-+-+-+-+-+-+-+-+-+-+-+                                       +
++                   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                   |  conv type(8) |                           |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+                           +
 |                                                               |
 +                                                               +
 |                                                               |
@@ -161,11 +165,11 @@ protocol "type(4):4, uuid(128):128, conv uuid(128):128, conv type(8):8, prev has
 |                                                               |
 +                                                               +
 |                         prev hash(256)                        |
-+                       +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|                       |              timestamp(32)            |
++                                   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                                   |                           |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|                       |                                       |
-+-+-+-+-+-+-+-+-+-+-+-+-+                                       +
+|            timestamp(32)          |                           |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+                           +
 |                                                               |
 +                                                               +
 |                                                               |
@@ -179,9 +183,9 @@ protocol "type(4):4, uuid(128):128, conv uuid(128):128, conv type(8):8, prev has
 |                                                               |
 +                                                               +
 |                           source(256)                         |
-+                       +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|                       |                                       |
-+-+-+-+-+-+-+-+-+-+-+-+-+                                       +
++                                   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                                   |                           |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+                           +
 |                                                               |
 +                                                               +
 |                                                               |
@@ -195,24 +199,26 @@ protocol "type(4):4, uuid(128):128, conv uuid(128):128, conv type(8):8, prev has
 |                                                               |
 +                                                               +
 |                        destination(256)                       |
-+                       +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|                       |         headers len(16)       |       |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+       +
-|                             headers                           |
-+               +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|               |                  data len(32)                 |
++                                   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                                   |       headers len(16)     |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|               |                      data                     |
+|   |                           headers                         |
++-+-+                       +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                           |            data len(32)           |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|       |        signature len(16)      |                       |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+                       +
+|                           |                data               |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                   |        signature len(16)      |           |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+           +
 |                            signature                          |
-+               +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|               |
-+-+-+-+-+-+-+-+-+
++                           +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                           |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 ```
 
 * `type` field for this message will be the unsigned integer `4`.
+
+* The `v` field represent the version of peer software which emitted the message. Incompatibilities should be detected here.
 
 * `uuid` field its an [UUID](https://www.rfc-editor.org/rfc/rfc4122.html) v4 that needs to be added to every message by the application, so previous messages can be easily referenced and found later.
 
@@ -293,21 +299,21 @@ sequenceDiagram
 The following message will be returned to the sender.
 
 ```bash
-protocol "type(4):4, uuid(128):128, message hash(256):256, acknowledger(256):256, signature len(16):16, signature:44"
+protocol "type(4):4, v len(6):6, uuid(128):128, message hash(256):256, acknowledger(256):256, signature len(16):16, signature:44"
 
  0                   1                   2                   3  
  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|type(4)|                                                       |
-+-+-+-+-+                                                       +
+|type(4)|  v len(6) |                                           |
++-+-+-+-+-+-+-+-+-+-+                                           +
 |                                                               |
 +                                                               +
 |                                                               |
 +                                                               +
 |                            uuid(128)                          |
-+       +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|       |                                                       |
-+-+-+-+-+                                                       +
++                   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                   |                                           |
++-+-+-+-+-+-+-+-+-+-+                                           +
 |                                                               |
 +                                                               +
 |                                                               |
@@ -321,9 +327,9 @@ protocol "type(4):4, uuid(128):128, message hash(256):256, acknowledger(256):256
 |                                                               |
 +                                                               +
 |                        message hash(256)                      |
-+       +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|       |                                                       |
-+-+-+-+-+                                                       +
++                   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                   |                                           |
++-+-+-+-+-+-+-+-+-+-+                                           +
 |                                                               |
 +                                                               +
 |                                                               |
@@ -336,15 +342,19 @@ protocol "type(4):4, uuid(128):128, message hash(256):256, acknowledger(256):256
 +                                                               +
 |                                                               |
 +                                                               +
-|                     acknowledger(256)                         |
-+       +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|       |        signature len(16)      |                       |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+                       +
+|                        acknowledger(256)                      |
++                   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                   |        signature len(16)      |           |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+           +
 |                            signature                          |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
++           +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|           |
++-+-+-+-+-+-+
 ```
 
-* `type` field represents an unsigned integer with value `5`
+* `type` field represents an unsigned integer with value `5`.
+
+* The `v` field represent the version of peer software which emitted the message. Incompatibilities should be detected here.
 
 * `uuid` field represents the identifier of the message we are acknowledging.
 
