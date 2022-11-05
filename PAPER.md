@@ -381,6 +381,8 @@ Peers could synchronize messages and messages acknowledges with an external bloc
 As we can see on this proposal, we are already chaining messages. An study about a data structure that would help to preserve such chains independently in a common, traversable data structure, is of the
 interests of this project.
 
+There are ongoing discussions about organize the separate conversations as completely independent "small chains" which are running in parallel. Then we could glue them together in an efficient time index. We know the conversations are initiated by an zeroed `prev hash` field, then just need to find all the messages with that conversation UUID. Then compose the chain based on prev hash again. The first message of the conversation (timestamp field) would indicate its position in the commented time index.
+
 ### Global discovery mechanisms
 
 In future versions global discovery distributed systems based on the internet could be studied.
