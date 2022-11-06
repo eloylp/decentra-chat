@@ -32,19 +32,20 @@ The first thing a `peer` will do after starting the application is to join the m
 Each peer will emit its multi-cast `UDP` announce packet at intervals of 5 seconds. Heres is the intended datagram:
 
 ```bash
-protocol "type(4):4,v len(6):6, address(32):32,port(16):16,nick len(7):7,nick:31,v:32,key fingerprint(256):256"
-
+protocol "type(8):8,v(8):8, address(32):32,port(16):16,nick len(7):7,nick:31,v len(32):32,key fingerprint(256):256"
  0                   1                   2                   3  
  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|type(4)|  v len(6) |                 address(32)               |
+|    type(8)    |      v(8)     |           address(32)         |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|                   |            port(16)           |nick len(7)|
+|                               |            port(16)           |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-| |                             nick                            |
+| nick len(7) |                       nick                      |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|                               v                               |
+|           |                     v len(32)                     |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|           |                                                   |
++-+-+-+-+-+-+                                                   +
 |                                                               |
 +                                                               +
 |                                                               |
@@ -52,17 +53,17 @@ protocol "type(4):4,v len(6):6, address(32):32,port(16):16,nick len(7):7,nick:31
 |                                                               |
 +                                                               +
 |                                                               |
-+                      key fingerprint(256)                     +
-|                                                               |
 +                                                               +
 |                                                               |
 +                                                               +
 |                                                               |
 +                                                               +
-|                                                               |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                      key fingerprint(256)                     |
++           +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|           |
++-+-+-+-+-+-+
 ```
-The above datagram has a total max size of `4 + 32 + 16 + (2^7*8) + (2^6*8) + 256 = 1844 bits` (around 230 bytes) , which is lower than the [maximum UDP packet size](https://stackoverflow.com/a/35697810), which is `508 bytes`. So all the discovery information fits in the same packet of an unreliable transport like UDP.
+The above datagram has a total max size of `8 + 8 + 32 + 16 + (2^7*8) + (2^6*8) + 256 = 1856 bits` (232 bytes) , which is lower than the [maximum UDP packet size](https://stackoverflow.com/a/35697810), which is `508 bytes`. So all the discovery information fits in the same packet of an unreliable transport like UDP.
 
 Other protocols like [multicast dns](https://en.wikipedia.org/wiki/Multicast_DNS) could be taken into account.
 
@@ -70,7 +71,7 @@ Lets describe the multiple parts:
 
 * The `type` field will indicate the message type, its an unsigned integer, which in this case will be `1` (discovery).
 
-* The `v` field represent the version of peer software which emitted the message. Incompatibilities should be detected here.
+* The `v` field represent the version of the message. Incompatibilities should be detected here.
 
 * The `address` (ipv4) field and `port` fields will indicate each peer how to contact each other.
 
@@ -90,38 +91,40 @@ This operation will take place only if the application cannot find an existing p
 This will be the request message that peers should send to each other.
 
 ```bash
-protocol "type(4):4"
+protocol "type(8):8,v(8):8"
 0                   1                   2                   3  
  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|type(4)|
-+-+-+-+-+
+|    type(8)    |      v(8)     |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 ```
 
 * The `type` field value of this message will be the unsigned integer `2`.
+
+* The `v` field represent the version of the message. Incompatibilities should be detected here.
 
 
 This will be the response message that peers should send back to each other:
 
 ```bash
-protocol "type(4):4, v len(6):6, key len(16):16, key data:76"
+protocol "type(8):8,v(8):8, key len(16):16, key data:76"
 
- 0                   1                   2                   3  
+0                   1                   2                   3  
  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|type(4)|  v len(6) |           key len(16)         |           |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+           +
+|    type(8)    |      v(8)     |           key len(16)         |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 |                                                               |
 +                                                               +
 |                            key data                           |
-+           +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|           |
-+-+-+-+-+-+-+
++                       +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                       |
++-+-+-+-+-+-+-+-+-+-+-+-+
 ```
 
 * The `type` field value of this message will be the unsigned integer `3`.
 
-* The `v` field represent the version of peer software which emitted the message. Incompatibilities should be detected here.
+* The `v` field represent the version of the message. Incompatibilities should be detected here.
 
 * The `key data` field will host the public key which must be in [PEM format](https://en.wikipedia.org/wiki/Privacy-Enhanced_Mail) (PGP flavor). Once the key is received by a peer, it will store it in its database, associated with its `key fingerprint`, which is the sha256 hash of the public key.
 
@@ -130,29 +133,29 @@ protocol "type(4):4, v len(6):6, key len(16):16, key data:76"
 The message format that peers will send to each other in a conversation:
 
 ```bash
-protocol "type(4):4, v len(6):6, uuid(128):128, conv uuid(128):128, conv type(8):8, prev hash(256): 256, timestamp(32):32, source(256):256,destination(256):256, headers len(16):16, headers:44, data len(32):32, data:28, signature len(16):16, signature:52"
+protocol "type(8):8, v(8):8, uuid(128):128, conv uuid(128):128, conv type(8):8, prev hash(256): 256, timestamp(32):32, source(256):256,destination(256):256, headers len(16):16, headers:44, data len(32):32, data:28, signature len(16):16, signature:52"
 
  0                   1                   2                   3  
  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|type(4)|  v len(6) |                                           |
-+-+-+-+-+-+-+-+-+-+-+                                           +
+|    type(8)    |      v(8)     |                               |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+                               +
 |                                                               |
 +                                                               +
 |                                                               |
 +                                                               +
 |                            uuid(128)                          |
-+                   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|                   |                                           |
-+-+-+-+-+-+-+-+-+-+-+                                           +
++                               +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                               |                               |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+                               +
 |                                                               |
 +                                                               +
 |                                                               |
 +                                                               +
 |                         conv uuid(128)                        |
-+                   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|                   |  conv type(8) |                           |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+                           +
++                               +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                               |  conv type(8) |               |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+               +
 |                                                               |
 +                                                               +
 |                                                               |
@@ -166,11 +169,11 @@ protocol "type(4):4, v len(6):6, uuid(128):128, conv uuid(128):128, conv type(8)
 |                                                               |
 +                                                               +
 |                         prev hash(256)                        |
-+                                   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|                                   |                           |
++                                               +-+-+-+-+-+-+-+-+
+|                                               |               |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|            timestamp(32)          |                           |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+                           +
+|                  timestamp(32)                |               |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+               +
 |                                                               |
 +                                                               +
 |                                                               |
@@ -184,9 +187,9 @@ protocol "type(4):4, v len(6):6, uuid(128):128, conv uuid(128):128, conv type(8)
 |                                                               |
 +                                                               +
 |                           source(256)                         |
-+                                   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|                                   |                           |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+                           +
++                                               +-+-+-+-+-+-+-+-+
+|                                               |               |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+               +
 |                                                               |
 +                                                               +
 |                                                               |
@@ -200,26 +203,26 @@ protocol "type(4):4, v len(6):6, uuid(128):128, conv uuid(128):128, conv type(8)
 |                                                               |
 +                                                               +
 |                        destination(256)                       |
-+                                   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|                                   |       headers len(16)     |
++                                               +-+-+-+-+-+-+-+-+
+|                                               | headers len(1.|
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|   |                           headers                         |
-+-+-+                       +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|                           |            data len(32)           |
+|               |                     headers                   |
++-+-+-+-+-+-+-+-+                       +-+-+-+-+-+-+-+-+-+-+-+-+
+|                                       |                       |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|                           |                data               |
+|              data len(32)             |                       |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|                   |        signature len(16)      |           |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+           +
+|              data             |        signature len(16)      |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 |                            signature                          |
-+                           +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|                           |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
++                                       +-+-+-+-+-+-+-+-+-+-+-+-+
+|                                       |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 ```
 
 * `type` field for this message will be the unsigned integer `4`.
 
-* The `v` field represent the version of peer software which emitted the message. Incompatibilities should be detected here.
+* The `v` field represent the version of the message. Incompatibilities should be detected here.
 
 * `uuid` field its an [UUID](https://www.rfc-editor.org/rfc/rfc4122.html) v4 that needs to be added to every message by the application, so previous messages can be easily referenced and found later.
 
@@ -304,21 +307,21 @@ sequenceDiagram
 The following message will be returned to the sender.
 
 ```bash
-protocol "type(4):4, v len(6):6, uuid(128):128, message hash(256):256, acknowledger(256):256, signature len(16):16, signature:44"
+protocol "type(8):8, v len(8):8, uuid(128):128, message hash(256):256, acknowledger(256):256, signature len(16):16, signature:44"
 
- 0                   1                   2                   3  
+0                   1                   2                   3  
  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|type(4)|  v len(6) |                                           |
-+-+-+-+-+-+-+-+-+-+-+                                           +
+|    type(8)    |    v len(8)   |                               |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+                               +
 |                                                               |
 +                                                               +
 |                                                               |
 +                                                               +
 |                            uuid(128)                          |
-+                   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|                   |                                           |
-+-+-+-+-+-+-+-+-+-+-+                                           +
++                               +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                               |                               |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+                               +
 |                                                               |
 +                                                               +
 |                                                               |
@@ -332,9 +335,9 @@ protocol "type(4):4, v len(6):6, uuid(128):128, message hash(256):256, acknowled
 |                                                               |
 +                                                               +
 |                        message hash(256)                      |
-+                   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|                   |                                           |
-+-+-+-+-+-+-+-+-+-+-+                                           +
++                               +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                               |                               |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+                               +
 |                                                               |
 +                                                               +
 |                                                               |
@@ -348,18 +351,18 @@ protocol "type(4):4, v len(6):6, uuid(128):128, message hash(256):256, acknowled
 |                                                               |
 +                                                               +
 |                        acknowledger(256)                      |
-+                   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|                   |        signature len(16)      |           |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+           +
++                               +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                               |        signature len(16)      |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 |                            signature                          |
-+           +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|           |
-+-+-+-+-+-+-+
++                       +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                       |
++-+-+-+-+-+-+-+-+-+-+-+-+
 ```
 
 * `type` field represents an unsigned integer with value `5`.
 
-* The `v` field represent the version of peer software which emitted the message. Incompatibilities should be detected here.
+* The `v` field represent the version of the message. Incompatibilities should be detected here.
 
 * `uuid` field represents the identifier of the message we are acknowledging.
 
