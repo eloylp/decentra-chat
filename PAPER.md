@@ -1,4 +1,5 @@
 # DecentraChat
+![](https://img.shields.io/static/v1?label=Status&message=Draft&color=yellow)
 
 ## Abstract
 
