@@ -32,18 +32,17 @@ The first thing a `peer` will do after starting the application is to join the m
 Each peer will emit its multi-cast `UDP` announce packet at intervals of 5 seconds. Heres is the intended datagram:
 
 ```bash
-protocol "type(8):8,v(8):8, address(32):32,port(16):16,nick len(7):7,nick:31, key fingerprint(256):256"
- 0                   1                   2                   3  
+0                   1                   2                   3  
  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 |    type(8)    |      v(8)     |           address(32)         |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 |                               |            port(16)           |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-| nick len(7) |                       nick                      |
+|  nick len(8)  |                      nick                     |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|           |                                                   |
-+-+-+-+-+-+-+                                                   +
+|             |                                                 |
++-+-+-+-+-+-+-+                                                 +
 |                                                               |
 +                                                               +
 |                                                               |
@@ -57,11 +56,11 @@ protocol "type(8):8,v(8):8, address(32):32,port(16):16,nick len(7):7,nick:31, ke
 |                                                               |
 +                                                               +
 |                      key fingerprint(256)                     |
-+           +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|           |
-+-+-+-+-+-+-+
++             +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|             |
++-+-+-+-+-+-+-+
 ```
-The above datagram has a total max size of `8 + 8 + 32 + 16 + (2^7*8) + (2^6*8) + 256 = 1856 bits` (232 bytes) , which is lower than the [maximum UDP packet size](https://stackoverflow.com/a/35697810), which is `508 bytes`. So all the discovery information fits in the same packet of an unreliable transport like UDP.
+The above datagram has a total max size of `8 + 8 + 32 + 16 + (2^8*8) + 256 = 2368 bits` (296 bytes) , which is lower than the [maximum UDP payload size to avoid fragmentation](https://stackoverflow.com/a/35697810), which is `508 bytes`. So all the discovery information fits in the same packet of an unreliable transport like UDP.
 
 Other protocols like [multicast dns](https://en.wikipedia.org/wiki/Multicast_DNS) could be taken into account.
 
