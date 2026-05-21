@@ -24,10 +24,12 @@ cargo test
 
 > TODO: coming in v0.1 — run two instances on the same LAN and they will discover each other automatically via IP multicast.
 
-## Protocol specification
+## Protocol and architecture
 
 The full protocol design — peer discovery, key exchange, message format, acknowledgement, and ordering — is documented in [PAPER.md](PAPER.md).
 
+The implemented v0.3 conversation read model is documented in [docs/CONVERSATION_ENGINE.md](docs/CONVERSATION_ENGINE.md).
+
 ## Contributing
 
-A contributor guide is in progress. See [CONTRIBUTING.md](CONTRIBUTING.md) once it lands.
+A contributor guide is still in progress. For now, use the build and test commands above.
