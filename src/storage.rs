@@ -8,6 +8,7 @@ use std::{
 use thiserror::Error;
 
 const MIGRATION_001: &str = "001_peer_keys";
+const MIGRATION_002: &str = "002_message_acks";
 
 /// SQLite-backed local storage for DecentraChat peer data.
 pub struct Storage {
@@ -34,6 +35,25 @@ pub struct PeerKeyUpsert {
     pub last_seen: i64,
 }
 
+/// Persisted delivery acknowledgement for one outbound chat message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MessageAckRecord {
+    pub message_uuid: [u8; 16],
+    pub message_hash: [u8; 32],
+    pub acknowledger: Fingerprint,
+    pub signature: Vec<u8>,
+    pub acknowledged_at: i64,
+}
+
+/// Data accepted by the ACK repository upsert operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MessageAckUpsert {
+    pub message_uuid: [u8; 16],
+    pub message_hash: [u8; 32],
+    pub acknowledger: Fingerprint,
+    pub signature: Vec<u8>,
+}
+
 /// Errors returned by SQLite storage initialization and repository operations.
 #[derive(Debug, Error)]
 pub enum StorageError {
@@ -55,6 +75,12 @@ pub enum StorageError {
     Repository(#[source] rusqlite::Error),
     #[error("peer public key must not be empty")]
     EmptyPublicKey,
+    #[error("message ACK signature must not be empty")]
+    EmptyAckSignature,
+    #[error("stored message UUID must be 16 bytes, got {len}")]
+    InvalidMessageUuidLength { len: usize },
+    #[error("stored message hash must be 32 bytes, got {len}")]
+    InvalidMessageHashLength { len: usize },
     #[error("stored peer fingerprint must be 32 bytes, got {len}")]
     InvalidFingerprintLength { len: usize },
     #[error("system clock is before the Unix epoch")]
@@ -136,6 +162,59 @@ impl Storage {
             .map(validate_record)
             .transpose()
     }
+
+    /// Insert or update the signed ACK state for an outbound message UUID.
+    pub fn upsert_message_ack(
+        &self,
+        upsert: MessageAckUpsert,
+    ) -> Result<MessageAckRecord, StorageError> {
+        if upsert.signature.is_empty() {
+            return Err(StorageError::EmptyAckSignature);
+        }
+
+        let acknowledged_at = unix_timestamp()?;
+        self.connection
+            .execute(
+                "INSERT INTO message_acks (
+                    message_uuid, message_hash, acknowledger, signature, acknowledged_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5)
+                ON CONFLICT(message_uuid) DO UPDATE SET
+                    message_hash = excluded.message_hash,
+                    acknowledger = excluded.acknowledger,
+                    signature = excluded.signature,
+                    acknowledged_at = excluded.acknowledged_at",
+                params![
+                    &upsert.message_uuid[..],
+                    &upsert.message_hash[..],
+                    &upsert.acknowledger[..],
+                    upsert.signature,
+                    acknowledged_at,
+                ],
+            )
+            .map_err(StorageError::Repository)?;
+
+        self.get_message_ack(upsert.message_uuid)?
+            .ok_or_else(|| StorageError::Repository(rusqlite::Error::QueryReturnedNoRows))
+    }
+
+    /// Fetch persisted ACK delivery state by the acknowledged message UUID.
+    pub fn get_message_ack(
+        &self,
+        message_uuid: [u8; 16],
+    ) -> Result<Option<MessageAckRecord>, StorageError> {
+        self.connection
+            .query_row(
+                "SELECT message_uuid, message_hash, acknowledger, signature, acknowledged_at
+                 FROM message_acks
+                 WHERE message_uuid = ?1",
+                params![&message_uuid[..]],
+                row_to_message_ack,
+            )
+            .optional()
+            .map_err(StorageError::Repository)?
+            .map(validate_ack_record)
+            .transpose()
+    }
 }
 
 fn apply_migrations(connection: &mut Connection) -> Result<(), StorageError> {
@@ -158,16 +237,30 @@ fn apply_migrations(connection: &mut Connection) -> Result<(), StorageError> {
             );
 
             CREATE INDEX IF NOT EXISTS idx_peer_keys_last_seen
-                ON peer_keys(last_seen);",
+                ON peer_keys(last_seen);
+
+            CREATE TABLE IF NOT EXISTS message_acks (
+                message_uuid BLOB PRIMARY KEY CHECK(length(message_uuid) = 16),
+                message_hash BLOB NOT NULL CHECK(length(message_hash) = 32),
+                acknowledger BLOB NOT NULL CHECK(length(acknowledger) = 32),
+                signature BLOB NOT NULL CHECK(length(signature) > 0),
+                acknowledged_at INTEGER NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_message_acks_acknowledger
+                ON message_acks(acknowledger);",
         )
         .map_err(StorageError::Migration)?;
 
-    transaction
-        .execute(
-            "INSERT OR IGNORE INTO schema_migrations (name, applied_at) VALUES (?1, ?2)",
-            params![MIGRATION_001, unix_timestamp()?],
-        )
-        .map_err(StorageError::Migration)?;
+    let now = unix_timestamp()?;
+    for migration in [MIGRATION_001, MIGRATION_002] {
+        transaction
+            .execute(
+                "INSERT OR IGNORE INTO schema_migrations (name, applied_at) VALUES (?1, ?2)",
+                params![migration, now],
+            )
+            .map_err(StorageError::Migration)?;
+    }
 
     transaction.commit().map_err(StorageError::Migration)
 }
@@ -189,11 +282,58 @@ fn row_to_peer_key(row: &rusqlite::Row<'_>) -> rusqlite::Result<PeerKeyRecord> {
     })
 }
 
+fn row_to_message_ack(row: &rusqlite::Row<'_>) -> rusqlite::Result<MessageAckRecord> {
+    Ok(MessageAckRecord {
+        message_uuid: vec_to_message_uuid(row.get(0)?).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                16,
+                rusqlite::types::Type::Blob,
+                Box::new(error),
+            )
+        })?,
+        message_hash: vec_to_message_hash(row.get(1)?).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                32,
+                rusqlite::types::Type::Blob,
+                Box::new(error),
+            )
+        })?,
+        acknowledger: vec_to_fingerprint(row.get(2)?).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                32,
+                rusqlite::types::Type::Blob,
+                Box::new(error),
+            )
+        })?,
+        signature: row.get(3)?,
+        acknowledged_at: row.get(4)?,
+    })
+}
+
 fn validate_record(record: PeerKeyRecord) -> Result<PeerKeyRecord, StorageError> {
     if record.public_key.is_empty() {
         return Err(StorageError::EmptyPublicKey);
     }
     Ok(record)
+}
+
+fn validate_ack_record(record: MessageAckRecord) -> Result<MessageAckRecord, StorageError> {
+    if record.signature.is_empty() {
+        return Err(StorageError::EmptyAckSignature);
+    }
+    Ok(record)
+}
+
+fn vec_to_message_uuid(bytes: Vec<u8>) -> Result<[u8; 16], StorageError> {
+    bytes.try_into().map_err(|bytes: Vec<u8>| {
+        StorageError::InvalidMessageUuidLength { len: bytes.len() }
+    })
+}
+
+fn vec_to_message_hash(bytes: Vec<u8>) -> Result<[u8; 32], StorageError> {
+    bytes.try_into().map_err(|bytes: Vec<u8>| {
+        StorageError::InvalidMessageHashLength { len: bytes.len() }
+    })
 }
 
 fn vec_to_fingerprint(bytes: Vec<u8>) -> Result<Fingerprint, StorageError> {
@@ -232,12 +372,13 @@ mod tests {
         let migration_count: i64 = storage
             .connection
             .query_row(
-                "SELECT COUNT(*) FROM schema_migrations WHERE name = ?1",
-                params![MIGRATION_001],
+                "SELECT COUNT(*) FROM schema_migrations
+                 WHERE name IN (?1, ?2)",
+                params![MIGRATION_001, MIGRATION_002],
                 |row| row.get(0),
             )
             .expect("query migration count");
-        assert_eq!(migration_count, 1);
+        assert_eq!(migration_count, 2);
         assert!(db_path.exists());
     }
 
@@ -253,7 +394,7 @@ mod tests {
             .connection
             .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| row.get(0))
             .expect("query migration count");
-        assert_eq!(migration_count, 1);
+        assert_eq!(migration_count, 2);
     }
 
     #[test]
@@ -330,5 +471,94 @@ mod tests {
             .expect_err("empty public key is invalid");
 
         assert!(matches!(error, StorageError::EmptyPublicKey));
+    }
+
+    #[test]
+    fn insert_and_fetch_message_ack() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = Storage::open(dir.path().join("dc.sqlite3")).expect("open storage");
+        let message_uuid = [0x11; 16];
+        let message_hash = [0x22; 32];
+        let acknowledger = [0x33; 32];
+
+        let record = storage
+            .upsert_message_ack(MessageAckUpsert {
+                message_uuid,
+                message_hash,
+                acknowledger,
+                signature: vec![4, 5, 6],
+            })
+            .expect("insert message ack");
+        let fetched = storage
+            .get_message_ack(message_uuid)
+            .expect("fetch message ack")
+            .expect("stored ack");
+
+        assert_eq!(record, fetched);
+        assert_eq!(fetched.message_uuid, message_uuid);
+        assert_eq!(fetched.message_hash, message_hash);
+        assert_eq!(fetched.acknowledger, acknowledger);
+        assert_eq!(fetched.signature, vec![4, 5, 6]);
+    }
+
+    #[test]
+    fn message_ack_migration_is_idempotent_on_existing_peer_key_database() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("dc.sqlite3");
+
+        {
+            let connection = Connection::open(&db_path).expect("open raw db");
+            connection
+                .execute_batch(
+                    "CREATE TABLE schema_migrations (
+                        name TEXT PRIMARY KEY,
+                        applied_at INTEGER NOT NULL
+                    );
+                    CREATE TABLE peer_keys (
+                        fingerprint BLOB PRIMARY KEY CHECK(length(fingerprint) = 32),
+                        nick TEXT,
+                        public_key BLOB NOT NULL CHECK(length(public_key) > 0),
+                        first_seen INTEGER NOT NULL,
+                        last_seen INTEGER NOT NULL,
+                        updated_at INTEGER NOT NULL
+                    );
+                    INSERT INTO schema_migrations (name, applied_at)
+                    VALUES ('001_peer_keys', 100);",
+                )
+                .expect("seed existing v0.2 db");
+        }
+
+        let storage = Storage::open(&db_path).expect("open migrated storage");
+        let migration_count: i64 = storage
+            .connection
+            .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| row.get(0))
+            .expect("query migration count");
+
+        assert_eq!(migration_count, 2);
+        storage
+            .upsert_message_ack(MessageAckUpsert {
+                message_uuid: [0x44; 16],
+                message_hash: [0x55; 32],
+                acknowledger: [0x66; 32],
+                signature: vec![7, 8, 9],
+            })
+            .expect("insert ack after migration");
+    }
+
+    #[test]
+    fn empty_message_ack_signature_is_rejected() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = Storage::open(dir.path().join("dc.sqlite3")).expect("open storage");
+
+        let error = storage
+            .upsert_message_ack(MessageAckUpsert {
+                message_uuid: [0x77; 16],
+                message_hash: [0x88; 32],
+                acknowledger: [0x99; 32],
+                signature: Vec::new(),
+            })
+            .expect_err("empty ack signature is invalid");
+
+        assert!(matches!(error, StorageError::EmptyAckSignature));
     }
 }
