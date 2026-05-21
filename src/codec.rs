@@ -1,5 +1,4 @@
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
-use std::fmt;
 use std::io::{self, Cursor, Read};
 
 pub const TYPE_DISCOVERY_ANNOUNCE: u8 = 1;
@@ -8,22 +7,13 @@ pub const TYPE_KEY_EXCHANGE_RESP: u8 = 3;
 pub const TYPE_CHAT_MESSAGE: u8 = 4;
 pub const TYPE_MESSAGE_ACK: u8 = 5;
 
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(Debug, thiserror::Error, PartialEq, Eq, Clone)]
 pub enum CodecError {
+    #[error("unexpected end of DC wire message")]
     UnexpectedEof,
+    #[error("unknown DC message type id {0}")]
     UnknownTypeId(u8),
 }
-
-impl fmt::Display for CodecError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::UnexpectedEof => write!(f, "unexpected end of DC wire message"),
-            Self::UnknownTypeId(type_id) => write!(f, "unknown DC message type id {type_id}"),
-        }
-    }
-}
-
-impl std::error::Error for CodecError {}
 
 impl From<io::Error> for CodecError {
     fn from(_: io::Error) -> Self {
