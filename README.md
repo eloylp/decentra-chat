@@ -22,7 +22,25 @@ cargo test
 
 ## Quickstart
 
-> TODO: coming in v0.1 — run two instances on the same LAN and they will discover each other automatically via IP multicast.
+Inspect the non-secret node configuration and initialize the local SQLite storage:
+
+```sh
+cargo run -- status
+```
+
+Use a specific config file:
+
+```sh
+cargo run -- --config ./config.toml status
+```
+
+Show the current command surface:
+
+```sh
+cargo run -- --help
+```
+
+Peer discovery and message sending are planned for later v1.0 work.
 
 ## Protocol and architecture
 

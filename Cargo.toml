@@ -7,6 +7,7 @@ edition = "2021"
 
 [dependencies]
 byteorder = "1"
+clap = { version = "4.5", features = ["derive"] }
 dirs = "5.0"
 pgp = "0.14"
 rand = "0.8"
