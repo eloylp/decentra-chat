@@ -44,12 +44,12 @@ pub enum ConfigError {
 }
 
 impl Config {
-    pub fn load() -> Result<Self, ConfigError> {
-        Self::load_from_path(default_config_path())
+    pub fn load() -> Result<Arc<Self>, ConfigError> {
+        Self::load_from_path(default_config_path()).map(Arc::new)
     }
 
     pub fn load_shared() -> Result<Arc<Self>, ConfigError> {
-        Self::load().map(Arc::new)
+        Self::load()
     }
 
     pub fn load_shared_from_path(path: impl AsRef<Path>) -> Result<Arc<Self>, ConfigError> {
@@ -60,7 +60,7 @@ impl Config {
         let path = path.as_ref();
 
         if !path.exists() {
-            return Self::defaults_for_config_path(path).validate();
+            return Self::defaults().validate();
         }
 
         let contents = fs::read_to_string(path).map_err(|source| ConfigError::Read {
@@ -75,22 +75,20 @@ impl Config {
             })?;
 
         file_config
-            .into_config(Self::defaults_for_config_path(path))?
+            .into_config(Self::defaults())?
             .validate()
     }
 
-    pub fn default_storage_path_for_config_path(path: &Path) -> PathBuf {
-        path.parent()
-            .unwrap_or_else(|| Path::new("."))
-            .join(DEFAULT_STORAGE_FILE)
+    pub fn default_storage_path() -> PathBuf {
+        default_config_dir().join(DEFAULT_STORAGE_FILE)
     }
 
-    fn defaults_for_config_path(path: &Path) -> Self {
+    fn defaults() -> Self {
         Self {
             multicast_group: DEFAULT_MULTICAST_GROUP,
             discovery_port: DEFAULT_DISCOVERY_PORT,
             listen_addr: DEFAULT_LISTEN_ADDR,
-            storage_path: Self::default_storage_path_for_config_path(path),
+            storage_path: Self::default_storage_path(),
         }
     }
 
@@ -119,7 +117,7 @@ impl Default for Config {
             multicast_group: DEFAULT_MULTICAST_GROUP,
             discovery_port: DEFAULT_DISCOVERY_PORT,
             listen_addr: DEFAULT_LISTEN_ADDR,
-            storage_path: default_config_dir().join(DEFAULT_STORAGE_FILE),
+            storage_path: Self::default_storage_path(),
         }
     }
 }
@@ -170,9 +168,7 @@ pub fn default_config_path() -> PathBuf {
 }
 
 fn default_config_dir() -> PathBuf {
-    env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
+    dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from(".config"))
         .join("decentra-chat")
 }
@@ -191,7 +187,7 @@ mod tests {
         assert_eq!(config.multicast_group, DEFAULT_MULTICAST_GROUP);
         assert_eq!(config.discovery_port, DEFAULT_DISCOVERY_PORT);
         assert_eq!(config.listen_addr, DEFAULT_LISTEN_ADDR);
-        assert_eq!(config.storage_path, dir.path().join(DEFAULT_STORAGE_FILE));
+        assert_eq!(config.storage_path, Config::default_storage_path());
     }
 
     #[test]
