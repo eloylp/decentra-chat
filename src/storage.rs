@@ -360,6 +360,7 @@ impl Storage {
                  FROM accepted_chat_messages
                  LEFT JOIN message_acks
                     ON message_acks.message_uuid = accepted_chat_messages.message_uuid
+                    AND message_acks.message_hash = accepted_chat_messages.message_hash
                  WHERE accepted_chat_messages.message_uuid = ?1",
                 params![&message_uuid[..]],
                 row_to_accepted_chat_message,
@@ -393,6 +394,7 @@ impl Storage {
                  FROM accepted_chat_messages
                  LEFT JOIN message_acks
                     ON message_acks.message_uuid = accepted_chat_messages.message_uuid
+                    AND message_acks.message_hash = accepted_chat_messages.message_hash
                  WHERE accepted_chat_messages.conversation_uuid = ?1
                  ORDER BY accepted_chat_messages.sent_at,
                     accepted_chat_messages.received_at,
@@ -1091,6 +1093,49 @@ mod tests {
             .expect("stored message");
 
         assert_eq!(fetched.acknowledged_at, Some(ack.acknowledged_at));
+    }
+
+    #[test]
+    fn conflicting_ack_hash_does_not_link_to_accepted_message() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = Storage::open(dir.path().join("dc.sqlite3")).expect("open storage");
+        let conversation_uuid = [0x65; 16];
+        let message_uuid = [0x66; 16];
+        let ack_message_hash = [0x67; 32];
+        let accepted_message_hash = [0x68; 32];
+
+        let ack = storage
+            .upsert_message_ack(MessageAckUpsert {
+                message_uuid,
+                message_hash: ack_message_hash,
+                acknowledger: [0x69; 32],
+                signature: vec![0x6a],
+            })
+            .expect("insert conflicting ack first");
+        storage
+            .insert_accepted_chat_message(accepted_message(
+                conversation_uuid,
+                message_uuid,
+                [0x00; 32],
+                accepted_message_hash,
+            ))
+            .expect("insert accepted message with same uuid and different hash");
+
+        let fetched = storage
+            .get_accepted_chat_message(message_uuid)
+            .expect("fetch accepted message")
+            .expect("stored message");
+        let messages = storage
+            .accepted_messages_by_conversation(conversation_uuid)
+            .expect("fetch conversation messages");
+        let stored_ack = storage
+            .get_message_ack(message_uuid)
+            .expect("fetch original ack")
+            .expect("stored ack");
+
+        assert_eq!(fetched.acknowledged_at, None);
+        assert_eq!(messages[0].acknowledged_at, None);
+        assert_eq!(stored_ack, ack);
     }
 
     #[test]
