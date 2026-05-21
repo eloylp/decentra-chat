@@ -1,6 +1,7 @@
 use crate::discovery::Fingerprint;
 use rusqlite::{params, Connection, OptionalExtension};
 use std::{
+    collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
@@ -9,6 +10,7 @@ use thiserror::Error;
 
 const MIGRATION_001: &str = "001_peer_keys";
 const MIGRATION_002: &str = "002_message_acks";
+const MIGRATION_003: &str = "003_conversation_messages";
 
 /// SQLite-backed local storage for DecentraChat peer data.
 pub struct Storage {
@@ -54,6 +56,36 @@ pub struct MessageAckUpsert {
     pub signature: Vec<u8>,
 }
 
+/// Accepted chat message persisted for conversation reconstruction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AcceptedChatMessageRecord {
+    pub conversation_uuid: [u8; 16],
+    pub message_uuid: [u8; 16],
+    pub previous_hash: [u8; 32],
+    pub message_hash: [u8; 32],
+    pub sender: Fingerprint,
+    pub sent_at: i64,
+    pub received_at: i64,
+    pub headers: Vec<u8>,
+    pub encrypted_payload: Vec<u8>,
+    pub decrypted_payload: Vec<u8>,
+    pub acknowledged_at: Option<i64>,
+}
+
+/// Data accepted by the conversation-message repository insert operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AcceptedChatMessageInsert {
+    pub conversation_uuid: [u8; 16],
+    pub message_uuid: [u8; 16],
+    pub previous_hash: [u8; 32],
+    pub message_hash: [u8; 32],
+    pub sender: Fingerprint,
+    pub sent_at: i64,
+    pub headers: Vec<u8>,
+    pub encrypted_payload: Vec<u8>,
+    pub decrypted_payload: Vec<u8>,
+}
+
 /// Errors returned by SQLite storage initialization and repository operations.
 #[derive(Debug, Error)]
 pub enum StorageError {
@@ -83,6 +115,14 @@ pub enum StorageError {
     InvalidMessageHashLength { len: usize },
     #[error("stored peer fingerprint must be 32 bytes, got {len}")]
     InvalidFingerprintLength { len: usize },
+    #[error("accepted chat message encrypted payload must not be empty")]
+    EmptyEncryptedPayload,
+    #[error("message UUID already exists with a different message hash")]
+    DuplicateMessageUuid,
+    #[error("message hash already exists for a different message UUID")]
+    DuplicateMessageHash,
+    #[error("conversation message chain cannot be resolved for conversation UUID")]
+    UnresolvedConversationChain,
     #[error("system clock is before the Unix epoch")]
     InvalidSystemTime,
 }
@@ -215,6 +255,164 @@ impl Storage {
             .map(validate_ack_record)
             .transpose()
     }
+
+    /// Idempotently persist one accepted chat message and its conversation row.
+    pub fn insert_accepted_chat_message(
+        &self,
+        insert: AcceptedChatMessageInsert,
+    ) -> Result<AcceptedChatMessageRecord, StorageError> {
+        if insert.encrypted_payload.is_empty() {
+            return Err(StorageError::EmptyEncryptedPayload);
+        }
+
+        if let Some(existing) = self.get_accepted_chat_message(insert.message_uuid)? {
+            if existing.message_hash == insert.message_hash {
+                return Ok(existing);
+            }
+            return Err(StorageError::DuplicateMessageUuid);
+        }
+
+        let hash_owner = self
+            .connection
+            .query_row(
+                "SELECT message_uuid
+                 FROM accepted_chat_messages
+                 WHERE message_hash = ?1",
+                params![&insert.message_hash[..]],
+                |row| vec_to_message_uuid(row.get(0)?).map_err(storage_error_to_sql_error),
+            )
+            .optional()
+            .map_err(StorageError::Repository)?;
+        if hash_owner.is_some_and(|message_uuid| message_uuid != insert.message_uuid) {
+            return Err(StorageError::DuplicateMessageHash);
+        }
+
+        let received_at = unix_timestamp()?;
+        self.connection
+            .execute(
+                "INSERT OR IGNORE INTO conversations (
+                    conversation_uuid, created_at, updated_at
+                ) VALUES (?1, ?2, ?2)",
+                params![&insert.conversation_uuid[..], received_at],
+            )
+            .map_err(StorageError::Repository)?;
+        self.connection
+            .execute(
+                "UPDATE conversations
+                 SET updated_at = MAX(updated_at, ?2)
+                 WHERE conversation_uuid = ?1",
+                params![&insert.conversation_uuid[..], received_at],
+            )
+            .map_err(StorageError::Repository)?;
+
+        self.connection
+            .execute(
+                "INSERT INTO accepted_chat_messages (
+                    conversation_uuid,
+                    message_uuid,
+                    previous_hash,
+                    message_hash,
+                    sender,
+                    sent_at,
+                    received_at,
+                    headers,
+                    encrypted_payload,
+                    decrypted_payload
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                params![
+                    &insert.conversation_uuid[..],
+                    &insert.message_uuid[..],
+                    &insert.previous_hash[..],
+                    &insert.message_hash[..],
+                    &insert.sender[..],
+                    insert.sent_at,
+                    received_at,
+                    insert.headers,
+                    insert.encrypted_payload,
+                    insert.decrypted_payload,
+                ],
+            )
+            .map_err(StorageError::Repository)?;
+
+        self.get_accepted_chat_message(insert.message_uuid)?
+            .ok_or_else(|| StorageError::Repository(rusqlite::Error::QueryReturnedNoRows))
+    }
+
+    /// Fetch an accepted chat message by message UUID.
+    pub fn get_accepted_chat_message(
+        &self,
+        message_uuid: [u8; 16],
+    ) -> Result<Option<AcceptedChatMessageRecord>, StorageError> {
+        self.connection
+            .query_row(
+                "SELECT
+                    accepted_chat_messages.conversation_uuid,
+                    accepted_chat_messages.message_uuid,
+                    accepted_chat_messages.previous_hash,
+                    accepted_chat_messages.message_hash,
+                    accepted_chat_messages.sender,
+                    accepted_chat_messages.sent_at,
+                    accepted_chat_messages.received_at,
+                    accepted_chat_messages.headers,
+                    accepted_chat_messages.encrypted_payload,
+                    accepted_chat_messages.decrypted_payload,
+                    message_acks.acknowledged_at
+                 FROM accepted_chat_messages
+                 LEFT JOIN message_acks
+                    ON message_acks.message_uuid = accepted_chat_messages.message_uuid
+                    AND message_acks.message_hash = accepted_chat_messages.message_hash
+                 WHERE accepted_chat_messages.message_uuid = ?1",
+                params![&message_uuid[..]],
+                row_to_accepted_chat_message,
+            )
+            .optional()
+            .map_err(StorageError::Repository)?
+            .map(validate_accepted_chat_message)
+            .transpose()
+    }
+
+    /// Fetch accepted messages for a conversation in resolved `prev_hash` chain order.
+    pub fn accepted_messages_by_conversation(
+        &self,
+        conversation_uuid: [u8; 16],
+    ) -> Result<Vec<AcceptedChatMessageRecord>, StorageError> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT
+                    accepted_chat_messages.conversation_uuid,
+                    accepted_chat_messages.message_uuid,
+                    accepted_chat_messages.previous_hash,
+                    accepted_chat_messages.message_hash,
+                    accepted_chat_messages.sender,
+                    accepted_chat_messages.sent_at,
+                    accepted_chat_messages.received_at,
+                    accepted_chat_messages.headers,
+                    accepted_chat_messages.encrypted_payload,
+                    accepted_chat_messages.decrypted_payload,
+                    message_acks.acknowledged_at
+                 FROM accepted_chat_messages
+                 LEFT JOIN message_acks
+                    ON message_acks.message_uuid = accepted_chat_messages.message_uuid
+                    AND message_acks.message_hash = accepted_chat_messages.message_hash
+                 WHERE accepted_chat_messages.conversation_uuid = ?1
+                 ORDER BY accepted_chat_messages.sent_at,
+                    accepted_chat_messages.received_at,
+                    accepted_chat_messages.message_uuid",
+            )
+            .map_err(StorageError::Repository)?;
+
+        let messages = statement
+            .query_map(params![&conversation_uuid[..]], row_to_accepted_chat_message)
+            .map_err(StorageError::Repository)?
+            .map(|row| {
+                row.map_err(StorageError::Repository)
+                    .and_then(validate_accepted_chat_message)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        order_message_chain(messages)
+    }
 }
 
 fn apply_migrations(connection: &mut Connection) -> Result<(), StorageError> {
@@ -248,12 +446,38 @@ fn apply_migrations(connection: &mut Connection) -> Result<(), StorageError> {
             );
 
             CREATE INDEX IF NOT EXISTS idx_message_acks_acknowledger
-                ON message_acks(acknowledger);",
+                ON message_acks(acknowledger);
+
+            CREATE TABLE IF NOT EXISTS conversations (
+                conversation_uuid BLOB PRIMARY KEY CHECK(length(conversation_uuid) = 16),
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS accepted_chat_messages (
+                message_uuid BLOB PRIMARY KEY CHECK(length(message_uuid) = 16),
+                conversation_uuid BLOB NOT NULL CHECK(length(conversation_uuid) = 16),
+                previous_hash BLOB NOT NULL CHECK(length(previous_hash) = 32),
+                message_hash BLOB NOT NULL UNIQUE CHECK(length(message_hash) = 32),
+                sender BLOB NOT NULL CHECK(length(sender) = 32),
+                sent_at INTEGER NOT NULL,
+                received_at INTEGER NOT NULL,
+                headers BLOB NOT NULL,
+                encrypted_payload BLOB NOT NULL CHECK(length(encrypted_payload) > 0),
+                decrypted_payload BLOB NOT NULL,
+                FOREIGN KEY(conversation_uuid) REFERENCES conversations(conversation_uuid)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_accepted_chat_messages_conversation
+                ON accepted_chat_messages(conversation_uuid);
+
+            CREATE INDEX IF NOT EXISTS idx_accepted_chat_messages_previous_hash
+                ON accepted_chat_messages(conversation_uuid, previous_hash);",
         )
         .map_err(StorageError::Migration)?;
 
     let now = unix_timestamp()?;
-    for migration in [MIGRATION_001, MIGRATION_002] {
+    for migration in [MIGRATION_001, MIGRATION_002, MIGRATION_003] {
         transaction
             .execute(
                 "INSERT OR IGNORE INTO schema_migrations (name, applied_at) VALUES (?1, ?2)",
@@ -310,6 +534,24 @@ fn row_to_message_ack(row: &rusqlite::Row<'_>) -> rusqlite::Result<MessageAckRec
     })
 }
 
+fn row_to_accepted_chat_message(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<AcceptedChatMessageRecord> {
+    Ok(AcceptedChatMessageRecord {
+        conversation_uuid: vec_to_message_uuid(row.get(0)?).map_err(storage_error_to_sql_error)?,
+        message_uuid: vec_to_message_uuid(row.get(1)?).map_err(storage_error_to_sql_error)?,
+        previous_hash: vec_to_message_hash(row.get(2)?).map_err(storage_error_to_sql_error)?,
+        message_hash: vec_to_message_hash(row.get(3)?).map_err(storage_error_to_sql_error)?,
+        sender: vec_to_fingerprint(row.get(4)?).map_err(storage_error_to_sql_error)?,
+        sent_at: row.get(5)?,
+        received_at: row.get(6)?,
+        headers: row.get(7)?,
+        encrypted_payload: row.get(8)?,
+        decrypted_payload: row.get(9)?,
+        acknowledged_at: row.get(10)?,
+    })
+}
+
 fn validate_record(record: PeerKeyRecord) -> Result<PeerKeyRecord, StorageError> {
     if record.public_key.is_empty() {
         return Err(StorageError::EmptyPublicKey);
@@ -322,6 +564,86 @@ fn validate_ack_record(record: MessageAckRecord) -> Result<MessageAckRecord, Sto
         return Err(StorageError::EmptyAckSignature);
     }
     Ok(record)
+}
+
+fn validate_accepted_chat_message(
+    record: AcceptedChatMessageRecord,
+) -> Result<AcceptedChatMessageRecord, StorageError> {
+    if record.encrypted_payload.is_empty() {
+        return Err(StorageError::EmptyEncryptedPayload);
+    }
+    Ok(record)
+}
+
+fn order_message_chain(
+    messages: Vec<AcceptedChatMessageRecord>,
+) -> Result<Vec<AcceptedChatMessageRecord>, StorageError> {
+    if messages.len() <= 1 {
+        return Ok(messages);
+    }
+
+    let zero_hash = [0u8; 32];
+    let by_hash = messages
+        .iter()
+        .enumerate()
+        .map(|(index, message)| (message.message_hash, index))
+        .collect::<HashMap<_, _>>();
+    if by_hash.len() != messages.len() {
+        return Err(StorageError::UnresolvedConversationChain);
+    }
+
+    let mut child_by_previous_hash = HashMap::new();
+    for (index, message) in messages.iter().enumerate() {
+        if child_by_previous_hash
+            .insert(message.previous_hash, index)
+            .is_some()
+        {
+            return Err(StorageError::UnresolvedConversationChain);
+        }
+    }
+
+    let starts = messages
+        .iter()
+        .enumerate()
+        .filter(|(_, message)| {
+            message.previous_hash == zero_hash || !by_hash.contains_key(&message.previous_hash)
+        })
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    let [mut current_index] = starts.as_slice() else {
+        return Err(StorageError::UnresolvedConversationChain);
+    };
+
+    let mut visited = HashSet::new();
+    let mut ordered = Vec::with_capacity(messages.len());
+    loop {
+        if !visited.insert(current_index) {
+            return Err(StorageError::UnresolvedConversationChain);
+        }
+
+        let message = messages[current_index].clone();
+        let next_hash = message.message_hash;
+        ordered.push(message);
+
+        let Some(next_index) = child_by_previous_hash.get(&next_hash).copied() else {
+            break;
+        };
+        current_index = next_index;
+    }
+
+    if ordered.len() != messages.len() {
+        return Err(StorageError::UnresolvedConversationChain);
+    }
+
+    Ok(ordered)
+}
+
+fn storage_error_to_sql_error(error: StorageError) -> rusqlite::Error {
+    rusqlite::Error::FromSqlConversionFailure(
+        0,
+        rusqlite::types::Type::Blob,
+        Box::new(error),
+    )
 }
 
 fn vec_to_message_uuid(bytes: Vec<u8>) -> Result<[u8; 16], StorageError> {
@@ -362,6 +684,25 @@ mod tests {
         }
     }
 
+    fn accepted_message(
+        conversation_uuid: [u8; 16],
+        message_uuid: [u8; 16],
+        previous_hash: [u8; 32],
+        message_hash: [u8; 32],
+    ) -> AcceptedChatMessageInsert {
+        AcceptedChatMessageInsert {
+            conversation_uuid,
+            message_uuid,
+            previous_hash,
+            message_hash,
+            sender: [0x42; 32],
+            sent_at: 123,
+            headers: vec![0x01, 0x02],
+            encrypted_payload: vec![0x03, 0x04],
+            decrypted_payload: b"hello".to_vec(),
+        }
+    }
+
     #[test]
     fn open_creates_migration_tables() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -373,12 +714,12 @@ mod tests {
             .connection
             .query_row(
                 "SELECT COUNT(*) FROM schema_migrations
-                 WHERE name IN (?1, ?2)",
-                params![MIGRATION_001, MIGRATION_002],
+                 WHERE name IN (?1, ?2, ?3)",
+                params![MIGRATION_001, MIGRATION_002, MIGRATION_003],
                 |row| row.get(0),
             )
             .expect("query migration count");
-        assert_eq!(migration_count, 2);
+        assert_eq!(migration_count, 3);
         assert!(db_path.exists());
     }
 
@@ -394,7 +735,7 @@ mod tests {
             .connection
             .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| row.get(0))
             .expect("query migration count");
-        assert_eq!(migration_count, 2);
+        assert_eq!(migration_count, 3);
     }
 
     #[test]
@@ -502,7 +843,7 @@ mod tests {
     }
 
     #[test]
-    fn message_ack_migration_is_idempotent_on_existing_peer_key_database() {
+    fn later_migrations_are_idempotent_on_existing_peer_key_database() {
         let dir = tempfile::tempdir().expect("tempdir");
         let db_path = dir.path().join("dc.sqlite3");
 
@@ -534,7 +875,7 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| row.get(0))
             .expect("query migration count");
 
-        assert_eq!(migration_count, 2);
+        assert_eq!(migration_count, 3);
         storage
             .upsert_message_ack(MessageAckUpsert {
                 message_uuid: [0x44; 16],
@@ -543,6 +884,14 @@ mod tests {
                 signature: vec![7, 8, 9],
             })
             .expect("insert ack after migration");
+        storage
+            .insert_accepted_chat_message(accepted_message(
+                [0x10; 16],
+                [0x11; 16],
+                [0x00; 32],
+                [0x12; 32],
+            ))
+            .expect("insert accepted message after migration");
     }
 
     #[test]
@@ -560,5 +909,261 @@ mod tests {
             .expect_err("empty ack signature is invalid");
 
         assert!(matches!(error, StorageError::EmptyAckSignature));
+    }
+
+    #[test]
+    fn insert_and_fetch_accepted_chat_message() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = Storage::open(dir.path().join("dc.sqlite3")).expect("open storage");
+        let conversation_uuid = [0x10; 16];
+        let message_uuid = [0x11; 16];
+        let previous_hash = [0x12; 32];
+        let message_hash = [0x13; 32];
+
+        let record = storage
+            .insert_accepted_chat_message(accepted_message(
+                conversation_uuid,
+                message_uuid,
+                previous_hash,
+                message_hash,
+            ))
+            .expect("insert accepted message");
+        let fetched = storage
+            .get_accepted_chat_message(message_uuid)
+            .expect("fetch accepted message")
+            .expect("stored accepted message");
+
+        assert_eq!(record, fetched);
+        assert_eq!(fetched.conversation_uuid, conversation_uuid);
+        assert_eq!(fetched.message_uuid, message_uuid);
+        assert_eq!(fetched.previous_hash, previous_hash);
+        assert_eq!(fetched.message_hash, message_hash);
+        assert_eq!(fetched.sender, [0x42; 32]);
+        assert_eq!(fetched.sent_at, 123);
+        assert!(fetched.received_at >= fetched.sent_at);
+        assert_eq!(fetched.headers, vec![0x01, 0x02]);
+        assert_eq!(fetched.encrypted_payload, vec![0x03, 0x04]);
+        assert_eq!(fetched.decrypted_payload, b"hello");
+        assert_eq!(fetched.acknowledged_at, None);
+    }
+
+    #[test]
+    fn duplicate_accepted_chat_message_insert_is_idempotent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = Storage::open(dir.path().join("dc.sqlite3")).expect("open storage");
+        let insert = accepted_message([0x20; 16], [0x21; 16], [0x00; 32], [0x22; 32]);
+
+        let first = storage
+            .insert_accepted_chat_message(insert.clone())
+            .expect("first insert");
+        let second = storage
+            .insert_accepted_chat_message(insert)
+            .expect("duplicate insert");
+
+        assert_eq!(second, first);
+    }
+
+    #[test]
+    fn duplicate_message_uuid_with_different_hash_is_rejected() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = Storage::open(dir.path().join("dc.sqlite3")).expect("open storage");
+        let conversation_uuid = [0x30; 16];
+        let message_uuid = [0x31; 16];
+
+        storage
+            .insert_accepted_chat_message(accepted_message(
+                conversation_uuid,
+                message_uuid,
+                [0x00; 32],
+                [0x32; 32],
+            ))
+            .expect("first insert");
+        let error = storage
+            .insert_accepted_chat_message(accepted_message(
+                conversation_uuid,
+                message_uuid,
+                [0x00; 32],
+                [0x33; 32],
+            ))
+            .expect_err("conflicting message hash");
+
+        assert!(matches!(error, StorageError::DuplicateMessageUuid));
+    }
+
+    #[test]
+    fn duplicate_message_hash_with_different_uuid_is_rejected() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = Storage::open(dir.path().join("dc.sqlite3")).expect("open storage");
+        let conversation_uuid = [0x40; 16];
+        let message_hash = [0x41; 32];
+
+        storage
+            .insert_accepted_chat_message(accepted_message(
+                conversation_uuid,
+                [0x42; 16],
+                [0x00; 32],
+                message_hash,
+            ))
+            .expect("first insert");
+        let error = storage
+            .insert_accepted_chat_message(accepted_message(
+                conversation_uuid,
+                [0x43; 16],
+                [0x00; 32],
+                message_hash,
+            ))
+            .expect_err("conflicting message uuid");
+
+        assert!(matches!(error, StorageError::DuplicateMessageHash));
+    }
+
+    #[test]
+    fn accepted_messages_are_fetched_in_chain_order() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = Storage::open(dir.path().join("dc.sqlite3")).expect("open storage");
+        let conversation_uuid = [0x50; 16];
+        let first_hash = [0x51; 32];
+        let second_hash = [0x52; 32];
+        let third_hash = [0x53; 32];
+
+        storage
+            .insert_accepted_chat_message(accepted_message(
+                conversation_uuid,
+                [0x54; 16],
+                second_hash,
+                third_hash,
+            ))
+            .expect("insert third");
+        storage
+            .insert_accepted_chat_message(accepted_message(
+                conversation_uuid,
+                [0x55; 16],
+                [0x00; 32],
+                first_hash,
+            ))
+            .expect("insert first");
+        storage
+            .insert_accepted_chat_message(accepted_message(
+                conversation_uuid,
+                [0x56; 16],
+                first_hash,
+                second_hash,
+            ))
+            .expect("insert second");
+
+        let messages = storage
+            .accepted_messages_by_conversation(conversation_uuid)
+            .expect("fetch chain");
+
+        assert_eq!(
+            messages
+                .iter()
+                .map(|message| message.message_hash)
+                .collect::<Vec<_>>(),
+            vec![first_hash, second_hash, third_hash]
+        );
+    }
+
+    #[test]
+    fn accepted_messages_include_ack_delivery_linkage() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = Storage::open(dir.path().join("dc.sqlite3")).expect("open storage");
+        let message_uuid = [0x61; 16];
+        let message_hash = [0x62; 32];
+
+        storage
+            .insert_accepted_chat_message(accepted_message(
+                [0x60; 16],
+                message_uuid,
+                [0x00; 32],
+                message_hash,
+            ))
+            .expect("insert accepted message");
+        let ack = storage
+            .upsert_message_ack(MessageAckUpsert {
+                message_uuid,
+                message_hash,
+                acknowledger: [0x63; 32],
+                signature: vec![0x64],
+            })
+            .expect("insert ack");
+        let fetched = storage
+            .get_accepted_chat_message(message_uuid)
+            .expect("fetch accepted message")
+            .expect("stored message");
+
+        assert_eq!(fetched.acknowledged_at, Some(ack.acknowledged_at));
+    }
+
+    #[test]
+    fn conflicting_ack_hash_does_not_link_to_accepted_message() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = Storage::open(dir.path().join("dc.sqlite3")).expect("open storage");
+        let conversation_uuid = [0x65; 16];
+        let message_uuid = [0x66; 16];
+        let ack_message_hash = [0x67; 32];
+        let accepted_message_hash = [0x68; 32];
+
+        let ack = storage
+            .upsert_message_ack(MessageAckUpsert {
+                message_uuid,
+                message_hash: ack_message_hash,
+                acknowledger: [0x69; 32],
+                signature: vec![0x6a],
+            })
+            .expect("insert conflicting ack first");
+        storage
+            .insert_accepted_chat_message(accepted_message(
+                conversation_uuid,
+                message_uuid,
+                [0x00; 32],
+                accepted_message_hash,
+            ))
+            .expect("insert accepted message with same uuid and different hash");
+
+        let fetched = storage
+            .get_accepted_chat_message(message_uuid)
+            .expect("fetch accepted message")
+            .expect("stored message");
+        let messages = storage
+            .accepted_messages_by_conversation(conversation_uuid)
+            .expect("fetch conversation messages");
+        let stored_ack = storage
+            .get_message_ack(message_uuid)
+            .expect("fetch original ack")
+            .expect("stored ack");
+
+        assert_eq!(fetched.acknowledged_at, None);
+        assert_eq!(messages[0].acknowledged_at, None);
+        assert_eq!(stored_ack, ack);
+    }
+
+    #[test]
+    fn unresolved_conversation_chain_is_rejected() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = Storage::open(dir.path().join("dc.sqlite3")).expect("open storage");
+        let conversation_uuid = [0x70; 16];
+
+        storage
+            .insert_accepted_chat_message(accepted_message(
+                conversation_uuid,
+                [0x71; 16],
+                [0x00; 32],
+                [0x72; 32],
+            ))
+            .expect("insert first chain");
+        storage
+            .insert_accepted_chat_message(accepted_message(
+                conversation_uuid,
+                [0x73; 16],
+                [0x00; 32],
+                [0x74; 32],
+            ))
+            .expect("insert second chain");
+        let error = storage
+            .accepted_messages_by_conversation(conversation_uuid)
+            .expect_err("ambiguous chain should fail");
+
+        assert!(matches!(error, StorageError::UnresolvedConversationChain));
     }
 }
