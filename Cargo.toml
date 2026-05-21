@@ -7,7 +7,13 @@ edition = "2021"
 
 [dependencies]
 byteorder = "1"
+dirs = "5.0"
 pgp = "0.14"
 rand = "0.8"
+serde = { version = "1.0", features = ["derive"] }
 sha2 = "0.10"
 thiserror = "1"
+toml = "0.8"
+
+[dev-dependencies]
+tempfile = "3.10"
