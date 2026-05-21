@@ -34,7 +34,7 @@ use thiserror::Error;
     name = "decentra-chat",
     version,
     about = "Local-first peer-to-peer chat client",
-    long_about = "DecentraChat is a local-first peer-to-peer chat client. The current command surface bootstraps configuration, storage diagnostics, and bounded LAN peer discovery."
+    long_about = "DecentraChat is a local-first peer-to-peer chat client. The current command surface covers configuration and storage diagnostics, bounded LAN peer discovery, key exchange, one-message send/receive, and local conversation history."
 )]
 pub struct Cli {
     /// Path to config.toml. Defaults to DC_CONFIG or the platform config directory.
