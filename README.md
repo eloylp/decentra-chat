@@ -40,7 +40,19 @@ Show the current command surface:
 cargo run -- --help
 ```
 
-Peer discovery and message sending are planned for later v1.0 work.
+Run a bounded local peer discovery session and print the visible peers:
+
+```sh
+cargo run -- discover --duration-ms 5000 --announce-interval-ms 1000 --nick local --fingerprint 0000000000000000000000000000000000000000000000000000000000000000
+```
+
+When testing multicast loopback on one machine, bind discovery to loopback explicitly:
+
+```sh
+cargo run -- --config ./config.toml discover --multicast-interface 127.0.0.1 --listen-port 51001 --duration-ms 3000
+```
+
+Encrypted message sending is planned for later v1.0 work.
 
 ## Protocol and architecture
 
