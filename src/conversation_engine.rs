@@ -1,6 +1,8 @@
 use crate::{
     discovery::Fingerprint,
-    storage::{AcceptedChatMessageRecord, ConversationRecord, Storage, StorageError},
+    storage::{
+        AcceptedChatMessageRecord, ConversationRecord, ReplyReference, Storage, StorageError,
+    },
 };
 use std::collections::{HashMap, HashSet};
 use thiserror::Error;
@@ -27,6 +29,15 @@ pub enum DeliveryState {
     Acknowledged { acknowledged_at: i64 },
 }
 
+/// Non-repudiation validation state for signed reply metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReplyState {
+    None,
+    Valid { target: ReplyReference },
+    Unresolved { target: ReplyReference },
+    Invalid { target: ReplyReference },
+}
+
 /// Display-ready persisted message data and metadata.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConversationMessage {
@@ -37,6 +48,7 @@ pub struct ConversationMessage {
     pub timestamp: i64,
     pub received_at: i64,
     pub delivery_state: DeliveryState,
+    pub reply_state: ReplyState,
     pub display_payload: Vec<u8>,
 }
 
@@ -92,7 +104,10 @@ impl<'a> ConversationEngine<'a> {
             .accepted_messages_by_conversation_fallback_order(conversation_uuid)?;
         let ordered = order_history(conversation_uuid, messages)?;
 
-        Ok(ordered.into_iter().map(ConversationMessage::from).collect())
+        ordered
+            .into_iter()
+            .map(|record| message_from_record(self.storage, conversation_uuid, record))
+            .collect()
     }
 }
 
@@ -106,24 +121,51 @@ impl From<ConversationRecord> for ConversationSummary {
     }
 }
 
-impl From<AcceptedChatMessageRecord> for ConversationMessage {
-    fn from(record: AcceptedChatMessageRecord) -> Self {
-        let delivery_state = record
-            .acknowledged_at
-            .map(|acknowledged_at| DeliveryState::Acknowledged { acknowledged_at })
-            .unwrap_or(DeliveryState::Unknown);
+fn message_from_record(
+    storage: &Storage,
+    conversation_uuid: [u8; 16],
+    record: AcceptedChatMessageRecord,
+) -> Result<ConversationMessage, ConversationEngineError> {
+    let delivery_state = record
+        .acknowledged_at
+        .map(|acknowledged_at| DeliveryState::Acknowledged { acknowledged_at })
+        .unwrap_or(DeliveryState::Unknown);
+    let reply_state =
+        validate_reply_reference(storage, conversation_uuid, record.reply_to.clone())?;
 
-        Self {
-            sender_fingerprint: record.sender,
-            message_uuid: record.message_uuid,
-            previous_hash: record.previous_hash,
-            message_hash: record.message_hash,
-            timestamp: record.sent_at,
-            received_at: record.received_at,
-            delivery_state,
-            display_payload: record.decrypted_payload,
-        }
+    Ok(ConversationMessage {
+        sender_fingerprint: record.sender,
+        message_uuid: record.message_uuid,
+        previous_hash: record.previous_hash,
+        message_hash: record.message_hash,
+        timestamp: record.sent_at,
+        received_at: record.received_at,
+        delivery_state,
+        reply_state,
+        display_payload: record.decrypted_payload,
+    })
+}
+
+fn validate_reply_reference(
+    storage: &Storage,
+    conversation_uuid: [u8; 16],
+    reply_to: Option<ReplyReference>,
+) -> Result<ReplyState, ConversationEngineError> {
+    let Some(target) = reply_to else {
+        return Ok(ReplyState::None);
+    };
+
+    let Some(referenced) = storage.get_accepted_chat_message(target.message_uuid)? else {
+        return Ok(ReplyState::Unresolved { target });
+    };
+
+    if referenced.conversation_uuid != conversation_uuid
+        || referenced.message_hash != target.message_hash
+    {
+        return Ok(ReplyState::Invalid { target });
     }
+
+    Ok(ReplyState::Valid { target })
 }
 
 fn order_history(
@@ -231,6 +273,14 @@ mod tests {
             headers: vec![0x01],
             encrypted_payload: vec![0x02],
             decrypted_payload: plaintext.to_vec(),
+            reply_to: None,
+        }
+    }
+
+    fn reply_to(message_uuid: [u8; 16], message_hash: [u8; 32]) -> ReplyReference {
+        ReplyReference {
+            message_uuid,
+            message_hash,
         }
     }
 
@@ -331,6 +381,7 @@ mod tests {
                 acknowledged_at: ack.acknowledged_at
             }
         );
+        assert_eq!(history[0].reply_state, ReplyState::None);
         assert_eq!(history[0].display_payload, b"hello");
     }
 
@@ -434,6 +485,160 @@ mod tests {
                 b"child".as_slice(),
                 b"complete".as_slice()
             ]
+        );
+    }
+
+    #[test]
+    fn reply_to_existing_message_with_matching_hash_is_valid() {
+        let (_dir, storage) = storage();
+        let conversation_uuid = [0x90; 16];
+        let target_uuid = [0x91; 16];
+        let target_hash = [0x92; 32];
+        storage
+            .insert_accepted_chat_message(accepted_message(
+                conversation_uuid,
+                target_uuid,
+                ZERO_HASH,
+                target_hash,
+                100,
+                b"offer",
+            ))
+            .expect("insert target");
+        let mut reply = accepted_message(
+            conversation_uuid,
+            [0x93; 16],
+            target_hash,
+            [0x94; 32],
+            200,
+            b"accept",
+        );
+        reply.reply_to = Some(reply_to(target_uuid, target_hash));
+        storage
+            .insert_accepted_chat_message(reply)
+            .expect("insert reply");
+        let engine = ConversationEngine::new(&storage);
+
+        let history = engine.message_history(conversation_uuid).expect("history");
+
+        assert_eq!(
+            history[1].reply_state,
+            ReplyState::Valid {
+                target: reply_to(target_uuid, target_hash)
+            }
+        );
+    }
+
+    #[test]
+    fn reply_to_missing_message_is_unresolved() {
+        let (_dir, storage) = storage();
+        let conversation_uuid = [0xa0; 16];
+        let target_uuid = [0xa1; 16];
+        let target_hash = [0xa2; 32];
+        let mut reply = accepted_message(
+            conversation_uuid,
+            [0xa3; 16],
+            ZERO_HASH,
+            [0xa4; 32],
+            100,
+            b"reply",
+        );
+        reply.reply_to = Some(reply_to(target_uuid, target_hash));
+        storage
+            .insert_accepted_chat_message(reply)
+            .expect("insert reply");
+        let engine = ConversationEngine::new(&storage);
+
+        let history = engine.message_history(conversation_uuid).expect("history");
+
+        assert_eq!(
+            history[0].reply_state,
+            ReplyState::Unresolved {
+                target: reply_to(target_uuid, target_hash)
+            }
+        );
+    }
+
+    #[test]
+    fn reply_to_existing_message_with_wrong_hash_is_invalid() {
+        let (_dir, storage) = storage();
+        let conversation_uuid = [0xb0; 16];
+        let target_uuid = [0xb1; 16];
+        let target_hash = [0xb2; 32];
+        let wrong_hash = [0xb3; 32];
+        storage
+            .insert_accepted_chat_message(accepted_message(
+                conversation_uuid,
+                target_uuid,
+                ZERO_HASH,
+                target_hash,
+                100,
+                b"target",
+            ))
+            .expect("insert target");
+        let mut reply = accepted_message(
+            conversation_uuid,
+            [0xb4; 16],
+            target_hash,
+            [0xb5; 32],
+            200,
+            b"reply",
+        );
+        reply.reply_to = Some(reply_to(target_uuid, wrong_hash));
+        storage
+            .insert_accepted_chat_message(reply)
+            .expect("insert reply");
+        let engine = ConversationEngine::new(&storage);
+
+        let history = engine.message_history(conversation_uuid).expect("history");
+
+        assert_eq!(
+            history[1].reply_state,
+            ReplyState::Invalid {
+                target: reply_to(target_uuid, wrong_hash)
+            }
+        );
+    }
+
+    #[test]
+    fn reply_to_message_in_another_conversation_is_invalid() {
+        let (_dir, storage) = storage();
+        let target_conversation_uuid = [0xc0; 16];
+        let reply_conversation_uuid = [0xc1; 16];
+        let target_uuid = [0xc2; 16];
+        let target_hash = [0xc3; 32];
+        storage
+            .insert_accepted_chat_message(accepted_message(
+                target_conversation_uuid,
+                target_uuid,
+                ZERO_HASH,
+                target_hash,
+                100,
+                b"target",
+            ))
+            .expect("insert target");
+        let mut reply = accepted_message(
+            reply_conversation_uuid,
+            [0xc4; 16],
+            ZERO_HASH,
+            [0xc5; 32],
+            200,
+            b"reply",
+        );
+        reply.reply_to = Some(reply_to(target_uuid, target_hash));
+        storage
+            .insert_accepted_chat_message(reply)
+            .expect("insert reply");
+        let engine = ConversationEngine::new(&storage);
+
+        let history = engine
+            .message_history(reply_conversation_uuid)
+            .expect("history");
+
+        assert_eq!(
+            history[0].reply_state,
+            ReplyState::Invalid {
+                target: reply_to(target_uuid, target_hash)
+            }
         );
     }
 

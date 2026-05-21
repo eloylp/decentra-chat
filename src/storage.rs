@@ -11,6 +11,7 @@ use thiserror::Error;
 const MIGRATION_001: &str = "001_peer_keys";
 const MIGRATION_002: &str = "002_message_acks";
 const MIGRATION_003: &str = "003_conversation_messages";
+const MIGRATION_004: &str = "004_reply_metadata";
 
 /// SQLite-backed local storage for DecentraChat peer data.
 pub struct Storage {
@@ -64,6 +65,13 @@ pub struct MessageAckUpsert {
     pub signature: Vec<u8>,
 }
 
+/// Signed reply target metadata extracted from accepted chat-message headers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplyReference {
+    pub message_uuid: [u8; 16],
+    pub message_hash: [u8; 32],
+}
+
 /// Accepted chat message persisted for conversation reconstruction.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AcceptedChatMessageRecord {
@@ -78,6 +86,7 @@ pub struct AcceptedChatMessageRecord {
     pub encrypted_payload: Vec<u8>,
     pub decrypted_payload: Vec<u8>,
     pub acknowledged_at: Option<i64>,
+    pub reply_to: Option<ReplyReference>,
 }
 
 /// Data accepted by the conversation-message repository insert operation.
@@ -92,6 +101,7 @@ pub struct AcceptedChatMessageInsert {
     pub headers: Vec<u8>,
     pub encrypted_payload: Vec<u8>,
     pub decrypted_payload: Vec<u8>,
+    pub reply_to: Option<ReplyReference>,
 }
 
 /// Errors returned by SQLite storage initialization and repository operations.
@@ -327,6 +337,9 @@ impl Storage {
         if insert.encrypted_payload.is_empty() {
             return Err(StorageError::EmptyEncryptedPayload);
         }
+        let reply_to = insert
+            .reply_to
+            .or_else(|| reply_reference_from_headers(&insert.headers));
 
         if let Some(existing) = self.get_accepted_chat_message(insert.message_uuid)? {
             if existing.message_hash == insert.message_hash {
@@ -380,8 +393,10 @@ impl Storage {
                     received_at,
                     headers,
                     encrypted_payload,
-                    decrypted_payload
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                    decrypted_payload,
+                    reply_to_uuid,
+                    reply_to_hash
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 params![
                     &insert.conversation_uuid[..],
                     &insert.message_uuid[..],
@@ -393,6 +408,8 @@ impl Storage {
                     insert.headers,
                     insert.encrypted_payload,
                     insert.decrypted_payload,
+                    reply_to.as_ref().map(|reply| &reply.message_uuid[..]),
+                    reply_to.as_ref().map(|reply| &reply.message_hash[..]),
                 ],
             )
             .map_err(StorageError::Repository)?;
@@ -419,6 +436,8 @@ impl Storage {
                     accepted_chat_messages.headers,
                     accepted_chat_messages.encrypted_payload,
                     accepted_chat_messages.decrypted_payload,
+                    accepted_chat_messages.reply_to_uuid,
+                    accepted_chat_messages.reply_to_hash,
                     message_acks.acknowledged_at
                  FROM accepted_chat_messages
                  LEFT JOIN message_acks
@@ -462,6 +481,8 @@ impl Storage {
                     accepted_chat_messages.headers,
                     accepted_chat_messages.encrypted_payload,
                     accepted_chat_messages.decrypted_payload,
+                    accepted_chat_messages.reply_to_uuid,
+                    accepted_chat_messages.reply_to_hash,
                     message_acks.acknowledged_at
                  FROM accepted_chat_messages
                  LEFT JOIN message_acks
@@ -536,6 +557,8 @@ fn apply_migrations(connection: &mut Connection) -> Result<(), StorageError> {
                 headers BLOB NOT NULL,
                 encrypted_payload BLOB NOT NULL CHECK(length(encrypted_payload) > 0),
                 decrypted_payload BLOB NOT NULL,
+                reply_to_uuid BLOB CHECK(reply_to_uuid IS NULL OR length(reply_to_uuid) = 16),
+                reply_to_hash BLOB CHECK(reply_to_hash IS NULL OR length(reply_to_hash) = 32),
                 FOREIGN KEY(conversation_uuid) REFERENCES conversations(conversation_uuid)
             );
 
@@ -547,8 +570,25 @@ fn apply_migrations(connection: &mut Connection) -> Result<(), StorageError> {
         )
         .map_err(StorageError::Migration)?;
 
+    if !column_exists(&transaction, "accepted_chat_messages", "reply_to_uuid")? {
+        transaction
+            .execute_batch(
+                "ALTER TABLE accepted_chat_messages
+                    ADD COLUMN reply_to_uuid BLOB CHECK(reply_to_uuid IS NULL OR length(reply_to_uuid) = 16);",
+            )
+            .map_err(StorageError::Migration)?;
+    }
+    if !column_exists(&transaction, "accepted_chat_messages", "reply_to_hash")? {
+        transaction
+            .execute_batch(
+                "ALTER TABLE accepted_chat_messages
+                    ADD COLUMN reply_to_hash BLOB CHECK(reply_to_hash IS NULL OR length(reply_to_hash) = 32);",
+            )
+            .map_err(StorageError::Migration)?;
+    }
+
     let now = unix_timestamp()?;
-    for migration in [MIGRATION_001, MIGRATION_002, MIGRATION_003] {
+    for migration in [MIGRATION_001, MIGRATION_002, MIGRATION_003, MIGRATION_004] {
         transaction
             .execute(
                 "INSERT OR IGNORE INTO schema_migrations (name, applied_at) VALUES (?1, ?2)",
@@ -558,6 +598,22 @@ fn apply_migrations(connection: &mut Connection) -> Result<(), StorageError> {
     }
 
     transaction.commit().map_err(StorageError::Migration)
+}
+
+fn column_exists(
+    transaction: &rusqlite::Transaction<'_>,
+    table: &str,
+    column: &str,
+) -> Result<bool, StorageError> {
+    let mut statement = transaction
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .map_err(StorageError::Migration)?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(StorageError::Migration)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(StorageError::Migration)?;
+    Ok(columns.iter().any(|name| name == column))
 }
 
 fn row_to_peer_key(row: &rusqlite::Row<'_>) -> rusqlite::Result<PeerKeyRecord> {
@@ -616,6 +672,11 @@ fn row_to_conversation(row: &rusqlite::Row<'_>) -> rusqlite::Result<Conversation
 fn row_to_accepted_chat_message(
     row: &rusqlite::Row<'_>,
 ) -> rusqlite::Result<AcceptedChatMessageRecord> {
+    let headers = row.get::<_, Vec<u8>>(7)?;
+    let reply_to = row_to_reply_reference(row.get(10)?, row.get(11)?)
+        .map_err(storage_error_to_sql_error)?
+        .or_else(|| reply_reference_from_headers(&headers));
+
     Ok(AcceptedChatMessageRecord {
         conversation_uuid: vec_to_message_uuid(row.get(0)?).map_err(storage_error_to_sql_error)?,
         message_uuid: vec_to_message_uuid(row.get(1)?).map_err(storage_error_to_sql_error)?,
@@ -624,10 +685,11 @@ fn row_to_accepted_chat_message(
         sender: vec_to_fingerprint(row.get(4)?).map_err(storage_error_to_sql_error)?,
         sent_at: row.get(5)?,
         received_at: row.get(6)?,
-        headers: row.get(7)?,
+        headers,
         encrypted_payload: row.get(8)?,
         decrypted_payload: row.get(9)?,
-        acknowledged_at: row.get(10)?,
+        reply_to,
+        acknowledged_at: row.get(12)?,
     })
 }
 
@@ -652,6 +714,89 @@ fn validate_accepted_chat_message(
         return Err(StorageError::EmptyEncryptedPayload);
     }
     Ok(record)
+}
+
+fn row_to_reply_reference(
+    uuid: Option<Vec<u8>>,
+    hash: Option<Vec<u8>>,
+) -> Result<Option<ReplyReference>, StorageError> {
+    match (uuid, hash) {
+        (Some(uuid), Some(hash)) => Ok(Some(ReplyReference {
+            message_uuid: vec_to_message_uuid(uuid)?,
+            message_hash: vec_to_message_hash(hash)?,
+        })),
+        _ => Ok(None),
+    }
+}
+
+fn reply_reference_from_headers(headers: &[u8]) -> Option<ReplyReference> {
+    let headers = std::str::from_utf8(headers).ok()?;
+    let mut reply_uuid = None;
+    let mut reply_hash = None;
+
+    for line in headers.lines() {
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        let value = value.trim();
+        if name.eq_ignore_ascii_case("Reply-To-UUID") {
+            reply_uuid = parse_uuid(value);
+        } else if name.eq_ignore_ascii_case("Reply-To-Hash") {
+            reply_hash = parse_hash(value);
+        }
+    }
+
+    Some(ReplyReference {
+        message_uuid: reply_uuid?,
+        message_hash: reply_hash?,
+    })
+}
+
+fn parse_uuid(input: &str) -> Option<[u8; 16]> {
+    let mut hex = String::with_capacity(32);
+    for byte in input.bytes() {
+        if byte == b'-' {
+            continue;
+        }
+        hex.push(byte as char);
+    }
+    if hex.len() != 32 {
+        return None;
+    }
+
+    let mut out = [0; 16];
+    for (index, chunk) in hex.as_bytes().chunks_exact(2).enumerate() {
+        out[index] = parse_hex_byte(chunk)?;
+    }
+    Some(out)
+}
+
+fn parse_hash(input: &str) -> Option<[u8; 32]> {
+    if input.len() != 64 {
+        return None;
+    }
+
+    let mut out = [0; 32];
+    for (index, chunk) in input.as_bytes().chunks_exact(2).enumerate() {
+        out[index] = parse_hex_byte(chunk)?;
+    }
+    Some(out)
+}
+
+fn parse_hex_byte(input: &[u8]) -> Option<u8> {
+    let [high, low] = input else {
+        return None;
+    };
+    Some(hex_value(*high)? << 4 | hex_value(*low)?)
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 fn order_message_chain(
@@ -779,6 +924,7 @@ mod tests {
             headers: vec![0x01, 0x02],
             encrypted_payload: vec![0x03, 0x04],
             decrypted_payload: b"hello".to_vec(),
+            reply_to: None,
         }
     }
 
@@ -793,12 +939,12 @@ mod tests {
             .connection
             .query_row(
                 "SELECT COUNT(*) FROM schema_migrations
-                 WHERE name IN (?1, ?2, ?3)",
-                params![MIGRATION_001, MIGRATION_002, MIGRATION_003],
+                 WHERE name IN (?1, ?2, ?3, ?4)",
+                params![MIGRATION_001, MIGRATION_002, MIGRATION_003, MIGRATION_004],
                 |row| row.get(0),
             )
             .expect("query migration count");
-        assert_eq!(migration_count, 3);
+        assert_eq!(migration_count, 4);
         assert!(db_path.exists());
     }
 
@@ -814,7 +960,7 @@ mod tests {
             .connection
             .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| row.get(0))
             .expect("query migration count");
-        assert_eq!(migration_count, 3);
+        assert_eq!(migration_count, 4);
     }
 
     #[test]
@@ -954,7 +1100,7 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| row.get(0))
             .expect("query migration count");
 
-        assert_eq!(migration_count, 3);
+        assert_eq!(migration_count, 4);
         storage
             .upsert_message_ack(MessageAckUpsert {
                 message_uuid: [0x44; 16],
@@ -1024,6 +1170,39 @@ mod tests {
         assert_eq!(fetched.encrypted_payload, vec![0x03, 0x04]);
         assert_eq!(fetched.decrypted_payload, b"hello");
         assert_eq!(fetched.acknowledged_at, None);
+        assert_eq!(fetched.reply_to, None);
+    }
+
+    #[test]
+    fn reply_metadata_is_extracted_from_signed_headers() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = Storage::open(dir.path().join("dc.sqlite3")).expect("open storage");
+        let target_uuid = [
+            0xbb, 0x55, 0x93, 0x10, 0x43, 0x87, 0x48, 0x78, 0xa5, 0x70, 0x7b, 0xdc, 0xbb,
+            0x99, 0x02, 0x98,
+        ];
+        let target_hash = [
+            0x92, 0xd0, 0x6d, 0x29, 0x3e, 0xfe, 0x37, 0x22, 0xf9, 0x57, 0x32, 0xce, 0x68,
+            0xb2, 0xcc, 0xef, 0x33, 0xc1, 0xa8, 0x09, 0x00, 0x83, 0x7e, 0x99, 0xc9, 0x0e,
+            0xf9, 0xfb, 0xde, 0x4a, 0x38, 0x12,
+        ];
+        let mut insert = accepted_message([0x90; 16], [0x91; 16], [0x00; 32], [0x92; 32]);
+        insert.headers = b"Content-Type: text/plain\r\n\
+            Reply-To-UUID: bb559310-4387-4878-a570-7bdcbb990298\r\n\
+            Reply-To-Hash: 92d06d293efe3722f95732ce68b2ccef33c1a80900837e99c90ef9fbde4a3812\r\n"
+            .to_vec();
+
+        let fetched = storage
+            .insert_accepted_chat_message(insert)
+            .expect("insert accepted message");
+
+        assert_eq!(
+            fetched.reply_to,
+            Some(ReplyReference {
+                message_uuid: target_uuid,
+                message_hash: target_hash,
+            })
+        );
     }
 
     #[test]
