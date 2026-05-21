@@ -115,6 +115,18 @@ In terminal 2, send one encrypted signed message as Alice and persist the ACK:
 cargo run -- --config ./alice.toml send --secret-key ./alice.secret --peer-fingerprint BOB_FINGERPRINT --peer 127.0.0.1:52003 --conversation 11111111-1111-4111-8111-111111111111 "hello bob"
 ```
 
+List conversations stored in Alice's local database:
+
+```sh
+cargo run -- --config ./alice.toml conversations
+```
+
+Show the ordered message history for a conversation, including delivery and reply-validation state:
+
+```sh
+cargo run -- --config ./alice.toml history --conversation 11111111-1111-4111-8111-111111111111
+```
+
 ## Protocol and architecture
 
 The full protocol design — peer discovery, key exchange, message format, acknowledgement, and ordering — is documented in [PAPER.md](PAPER.md).
