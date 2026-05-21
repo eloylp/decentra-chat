@@ -1,5 +1,9 @@
 use crate::{
     config::{default_config_path, Config, ConfigError},
+    conversation_engine::{
+        ConversationEngine, ConversationEngineError, ConversationMessage, DeliveryState,
+        ReplyState,
+    },
     crypto::{self, public_key_to_bytes, KeyPair},
     discovery::{
         Discovery, DiscoveryError, DiscoverySettings, Fingerprint, LocalNode, PeerEntry,
@@ -57,6 +61,10 @@ pub enum CliCommand {
     Receive(ReceiveArgs),
     /// Send one encrypted signed message to a known peer and persist its ACK.
     Send(SendArgs),
+    /// List known conversations in local storage.
+    Conversations,
+    /// Show ordered message history for one conversation.
+    History(HistoryArgs),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, clap::Args)]
@@ -164,6 +172,13 @@ pub struct SendArgs {
     message: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, clap::Args)]
+pub struct HistoryArgs {
+    /// Conversation UUID as 32 hex characters or canonical hyphenated UUID.
+    #[arg(long, value_name = "UUID")]
+    conversation: String,
+}
+
 #[derive(Debug, Error)]
 pub enum CliError {
     #[error("failed to load config from {path}: {source}")]
@@ -225,6 +240,16 @@ pub enum CliError {
     MissingPeerKey { fingerprint: String },
     #[error("failed to persist message facts: {0}")]
     PersistMessage(#[source] StorageError),
+    #[error(
+        "conversation {conversation_uuid} is not in local storage; run `conversations` to list known conversations or receive/send a message first"
+    )]
+    MissingConversation { conversation_uuid: String },
+    #[error(
+        "conversation {conversation_uuid} has a broken prev_hash chain; inspect stored messages before relying on this history"
+    )]
+    BrokenConversationChain { conversation_uuid: String },
+    #[error("failed to read conversation history: {0}")]
+    ReadConversation(#[source] ConversationEngineError),
     #[error("failed to exchange peer key: {0}")]
     KeyExchange(#[from] KeyExchangeError),
     #[error("failed to send or receive encrypted message: {0}")]
@@ -295,6 +320,8 @@ pub fn run<W: Write>(cli: Cli, mut writer: W) -> Result<(), CliError> {
             let runtime = runtime()?;
             runtime.block_on(run_send(cli.config_path(), args, &mut writer))?;
         }
+        CliCommand::Conversations => run_conversations(cli.config_path(), &mut writer)?,
+        CliCommand::History(args) => run_history(cli.config_path(), args, &mut writer)?,
     }
     Ok(())
 }
@@ -560,6 +587,124 @@ async fn run_send<W: Write>(
     Ok(())
 }
 
+fn run_conversations<W: Write>(config_path: PathBuf, writer: &mut W) -> Result<(), CliError> {
+    let storage = open_storage(config_path)?;
+    let engine = ConversationEngine::new(&storage);
+    let conversations = engine
+        .list_conversations()
+        .map_err(CliError::ReadConversation)?;
+
+    writeln!(writer, "conversations: {}", conversations.len())?;
+    writeln!(writer, "conversation_uuid\tcreated_at\tupdated_at")?;
+    for conversation in conversations {
+        writeln!(
+            writer,
+            "{}\t{}\t{}",
+            uuid_hex(&conversation.conversation_uuid),
+            conversation.created_at,
+            conversation.updated_at
+        )?;
+    }
+    Ok(())
+}
+
+fn run_history<W: Write>(
+    config_path: PathBuf,
+    args: HistoryArgs,
+    writer: &mut W,
+) -> Result<(), CliError> {
+    let conversation_uuid = parse_uuid(&args.conversation)?;
+    let storage = open_storage(config_path)?;
+    let engine = ConversationEngine::new(&storage);
+    let history = engine
+        .message_history(conversation_uuid)
+        .map_err(|error| conversation_error(error, conversation_uuid))?;
+
+    writeln!(
+        writer,
+        "history: conversation_uuid={} messages={}",
+        uuid_hex(&conversation_uuid),
+        history.len()
+    )?;
+    writeln!(
+        writer,
+        "message_uuid\tsender_fingerprint\ttimestamp\tdelivery_state\treply_state\tpayload"
+    )?;
+    for message in history {
+        write_history_message(writer, &message)?;
+    }
+    Ok(())
+}
+
+fn conversation_error(
+    error: ConversationEngineError,
+    requested_uuid: [u8; 16],
+) -> CliError {
+    match error {
+        ConversationEngineError::MissingConversation { .. } => CliError::MissingConversation {
+            conversation_uuid: uuid_hex(&requested_uuid),
+        },
+        ConversationEngineError::BrokenChain { .. } => CliError::BrokenConversationChain {
+            conversation_uuid: uuid_hex(&requested_uuid),
+        },
+        error => CliError::ReadConversation(error),
+    }
+}
+
+fn write_history_message<W: Write>(
+    writer: &mut W,
+    message: &ConversationMessage,
+) -> Result<(), io::Error> {
+    writeln!(
+        writer,
+        "{}\t{}\t{}\t{}\t{}\t{}",
+        uuid_hex(&message.message_uuid),
+        fingerprint_hex(&message.sender_fingerprint),
+        message.timestamp,
+        delivery_state_label(&message.delivery_state),
+        reply_state_label(&message.reply_state),
+        escaped_payload(&message.display_payload)
+    )
+}
+
+fn delivery_state_label(state: &DeliveryState) -> String {
+    match state {
+        DeliveryState::Unknown => "unknown".to_owned(),
+        DeliveryState::Acknowledged { acknowledged_at } => {
+            format!("acknowledged:{acknowledged_at}")
+        }
+    }
+}
+
+fn reply_state_label(state: &ReplyState) -> String {
+    match state {
+        ReplyState::None => "none".to_owned(),
+        ReplyState::Valid { target } => format!(
+            "valid:{}:{}",
+            uuid_hex(&target.message_uuid),
+            fingerprint_hex(&target.message_hash)
+        ),
+        ReplyState::Unresolved { target } => format!(
+            "unresolved:{}:{}",
+            uuid_hex(&target.message_uuid),
+            fingerprint_hex(&target.message_hash)
+        ),
+        ReplyState::Invalid { target } => format!(
+            "invalid:{}:{}",
+            uuid_hex(&target.message_uuid),
+            fingerprint_hex(&target.message_hash)
+        ),
+    }
+}
+
+fn escaped_payload(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes)
+        .replace('\\', "\\\\")
+        .replace('\t', "\\t")
+        .replace('\r', "\\r")
+        .replace('\n', "\\n")
+}
+
 fn open_storage(config_path: PathBuf) -> Result<Storage, CliError> {
     let config = Config::load_from_path(&config_path).map_err(|source| CliError::LoadConfig {
         path: config_path.clone(),
@@ -797,12 +942,12 @@ fn nibble_hex(value: u8) -> char {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::{MessageAckUpsert, PeerKeyUpsert, ReplyReference};
     use clap::Parser;
     use std::fs;
-    use std::thread;
     use std::sync::atomic::{AtomicU16, Ordering};
+    use std::thread;
     use std::time::Duration as StdDuration;
-    use crate::storage::PeerKeyUpsert;
 
     static NEXT_DISCOVERY_PORT: AtomicU16 = AtomicU16::new(43091);
     static NEXT_TCP_PORT: AtomicU16 = AtomicU16::new(51091);
@@ -839,6 +984,8 @@ mod tests {
         assert!(help.contains("discover"));
         assert!(help.contains("receive"));
         assert!(help.contains("send"));
+        assert!(help.contains("conversations"));
+        assert!(help.contains("history"));
 
         let mut command = Cli::command_for_help();
         let discover = command
@@ -884,6 +1031,25 @@ mod tests {
                 previous_hash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
                     .to_owned(),
                 message: "hello bob".to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn parses_history_subcommand_with_conversation_uuid() {
+        let cli = Cli::parse_from([
+            "decentra-chat",
+            "--config",
+            "config.toml",
+            "history",
+            "--conversation",
+            "11111111-1111-4111-8111-111111111111",
+        ]);
+
+        assert_eq!(
+            cli.command(),
+            CliCommand::History(HistoryArgs {
+                conversation: "11111111-1111-4111-8111-111111111111".to_owned(),
             })
         );
     }
@@ -1070,6 +1236,234 @@ storage_path = "{}"
     }
 
     #[test]
+    fn conversations_lists_known_conversations() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage_path = dir.path().join("chat.sqlite3");
+        let config_path = write_config(dir.path(), "config.toml", &storage_path);
+        let conversation_uuid =
+            parse_uuid("11111111-1111-4111-8111-111111111111").expect("conversation uuid");
+        Storage::open(&storage_path)
+            .expect("open storage")
+            .ensure_conversation(conversation_uuid)
+            .expect("ensure conversation");
+        let mut output = Vec::new();
+
+        run_from(
+            [
+                "decentra-chat",
+                "--config",
+                config_path.to_str().expect("utf-8 path"),
+                "conversations",
+            ],
+            &mut output,
+        )
+        .expect("list conversations");
+
+        let output = String::from_utf8(output).expect("output is UTF-8");
+        assert!(output.contains("conversations: 1"));
+        assert!(output.contains("conversation_uuid\tcreated_at\tupdated_at"));
+        assert!(output.contains("11111111111141118111111111111111"));
+    }
+
+    #[test]
+    fn history_displays_empty_conversation() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage_path = dir.path().join("chat.sqlite3");
+        let config_path = write_config(dir.path(), "config.toml", &storage_path);
+        let conversation = "11111111-1111-4111-8111-111111111111";
+        Storage::open(&storage_path)
+            .expect("open storage")
+            .ensure_conversation(parse_uuid(conversation).expect("conversation uuid"))
+            .expect("ensure conversation");
+        let mut output = Vec::new();
+
+        run_from(
+            [
+                "decentra-chat",
+                "--config",
+                config_path.to_str().expect("utf-8 path"),
+                "history",
+                "--conversation",
+                conversation,
+            ],
+            &mut output,
+        )
+        .expect("history succeeds");
+
+        let output = String::from_utf8(output).expect("output is UTF-8");
+        assert!(output.contains("messages=0"));
+        assert!(output.contains(
+            "message_uuid\tsender_fingerprint\ttimestamp\tdelivery_state\treply_state\tpayload"
+        ));
+    }
+
+    #[test]
+    fn history_uses_prev_hash_order_and_displays_ack_state() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage_path = dir.path().join("chat.sqlite3");
+        let config_path = write_config(dir.path(), "config.toml", &storage_path);
+        let conversation = "11111111-1111-4111-8111-111111111111";
+        let conversation_uuid = parse_uuid(conversation).expect("conversation uuid");
+        let first_uuid = [0x21; 16];
+        let second_uuid = [0x22; 16];
+        let first_hash = [0x31; 32];
+        let second_hash = [0x32; 32];
+        let storage = Storage::open(&storage_path).expect("open storage");
+        storage
+            .insert_accepted_chat_message(cli_accepted_message(
+                conversation_uuid,
+                second_uuid,
+                first_hash,
+                second_hash,
+                200,
+                b"second",
+                None,
+            ))
+            .expect("insert second");
+        storage
+            .insert_accepted_chat_message(cli_accepted_message(
+                conversation_uuid,
+                first_uuid,
+                [0; 32],
+                first_hash,
+                100,
+                b"first",
+                None,
+            ))
+            .expect("insert first");
+        let ack = storage
+            .upsert_message_ack(MessageAckUpsert {
+                message_uuid: first_uuid,
+                message_hash: first_hash,
+                acknowledger: [0x41; 32],
+                signature: vec![0x42],
+            })
+            .expect("insert ack");
+        let mut output = Vec::new();
+
+        run_from(
+            [
+                "decentra-chat",
+                "--config",
+                config_path.to_str().expect("utf-8 path"),
+                "history",
+                "--conversation",
+                conversation,
+            ],
+            &mut output,
+        )
+        .expect("history succeeds");
+
+        let output = String::from_utf8(output).expect("output is UTF-8");
+        let first_index = output.find("\tfirst").expect("first payload");
+        let second_index = output.find("\tsecond").expect("second payload");
+        assert!(first_index < second_index);
+        assert!(output.contains(&format!("acknowledged:{}", ack.acknowledged_at)));
+        assert!(output.contains("\tunknown\tnone\tsecond"));
+    }
+
+    #[test]
+    fn history_displays_unresolved_and_invalid_reply_states() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage_path = dir.path().join("chat.sqlite3");
+        let config_path = write_config(dir.path(), "config.toml", &storage_path);
+        let conversation = "11111111-1111-4111-8111-111111111111";
+        let conversation_uuid = parse_uuid(conversation).expect("conversation uuid");
+        let target_uuid = [0x51; 16];
+        let target_hash = [0x52; 32];
+        let unresolved_target = ReplyReference {
+            message_uuid: [0x53; 16],
+            message_hash: [0x54; 32],
+        };
+        let invalid_target = ReplyReference {
+            message_uuid: target_uuid,
+            message_hash: [0x55; 32],
+        };
+        let storage = Storage::open(&storage_path).expect("open storage");
+        storage
+            .insert_accepted_chat_message(cli_accepted_message(
+                conversation_uuid,
+                target_uuid,
+                [0; 32],
+                target_hash,
+                100,
+                b"target",
+                None,
+            ))
+            .expect("insert target");
+        storage
+            .insert_accepted_chat_message(cli_accepted_message(
+                conversation_uuid,
+                [0x56; 16],
+                target_hash,
+                [0x57; 32],
+                200,
+                b"unresolved",
+                Some(unresolved_target.clone()),
+            ))
+            .expect("insert unresolved reply");
+        storage
+            .insert_accepted_chat_message(cli_accepted_message(
+                conversation_uuid,
+                [0x58; 16],
+                [0x57; 32],
+                [0x59; 32],
+                300,
+                b"invalid",
+                Some(invalid_target.clone()),
+            ))
+            .expect("insert invalid reply");
+        let mut output = Vec::new();
+
+        run_from(
+            [
+                "decentra-chat",
+                "--config",
+                config_path.to_str().expect("utf-8 path"),
+                "history",
+                "--conversation",
+                conversation,
+            ],
+            &mut output,
+        )
+        .expect("history succeeds");
+
+        let output = String::from_utf8(output).expect("output is UTF-8");
+        assert!(output.contains(&format!(
+            "unresolved:{}:{}",
+            uuid_hex(&unresolved_target.message_uuid),
+            fingerprint_hex(&unresolved_target.message_hash)
+        )));
+        assert!(output.contains(&format!(
+            "invalid:{}:{}",
+            uuid_hex(&invalid_target.message_uuid),
+            fingerprint_hex(&invalid_target.message_hash)
+        )));
+    }
+
+    #[test]
+    fn missing_history_conversation_is_actionable() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage_path = dir.path().join("chat.sqlite3");
+        let config_path = write_config(dir.path(), "config.toml", &storage_path);
+
+        let error = run_from(
+            [
+                "decentra-chat",
+                "--config",
+                config_path.to_str().expect("utf-8 path"),
+                "history",
+                "--conversation",
+                "11111111-1111-4111-8111-111111111111",
+            ],
+            Vec::new(),
+        )
+        .expect_err("conversation is missing");
+
+        assert!(error.to_string().contains("run `conversations`"));
+    }
+
+    #[test]
     fn bounded_cli_send_receive_loopback_persists_messages_and_ack() {
         let port = NEXT_TCP_PORT.fetch_add(1, Ordering::Relaxed);
         let addr = format!("127.0.0.1:{port}");
@@ -1206,5 +1600,28 @@ storage_path = "{}"
                 last_seen: 1,
             })
             .expect("seed peer key");
+    }
+
+    fn cli_accepted_message(
+        conversation_uuid: [u8; 16],
+        message_uuid: [u8; 16],
+        previous_hash: [u8; 32],
+        message_hash: [u8; 32],
+        sent_at: i64,
+        plaintext: &[u8],
+        reply_to: Option<ReplyReference>,
+    ) -> AcceptedChatMessageInsert {
+        AcceptedChatMessageInsert {
+            conversation_uuid,
+            message_uuid,
+            previous_hash,
+            message_hash,
+            sender: [0x61; 32],
+            sent_at,
+            headers: b"Content-Type: text/plain".to_vec(),
+            encrypted_payload: vec![0x62],
+            decrypted_payload: plaintext.to_vec(),
+            reply_to,
+        }
     }
 }
