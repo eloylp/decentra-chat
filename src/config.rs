@@ -60,7 +60,7 @@ impl Config {
         let path = path.as_ref();
 
         if !path.exists() {
-            return Self::defaults().validate();
+            return Self::default().validate();
         }
 
         let contents = fs::read_to_string(path).map_err(|source| ConfigError::Read {
@@ -75,21 +75,12 @@ impl Config {
             })?;
 
         file_config
-            .into_config(Self::defaults())?
+            .into_config(Self::default())?
             .validate()
     }
 
     pub fn default_storage_path() -> PathBuf {
         default_config_dir().join(DEFAULT_STORAGE_FILE)
-    }
-
-    fn defaults() -> Self {
-        Self {
-            multicast_group: DEFAULT_MULTICAST_GROUP,
-            discovery_port: DEFAULT_DISCOVERY_PORT,
-            listen_addr: DEFAULT_LISTEN_ADDR,
-            storage_path: Self::default_storage_path(),
-        }
     }
 
     fn validate(self) -> Result<Self, ConfigError> {
