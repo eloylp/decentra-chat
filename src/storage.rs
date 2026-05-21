@@ -47,6 +47,14 @@ pub struct MessageAckRecord {
     pub acknowledged_at: i64,
 }
 
+/// Persisted conversation metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConversationRecord {
+    pub conversation_uuid: [u8; 16],
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
 /// Data accepted by the ACK repository upsert operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MessageAckUpsert {
@@ -256,6 +264,61 @@ impl Storage {
             .transpose()
     }
 
+    /// Ensure a conversation row exists even before any messages have arrived.
+    pub fn ensure_conversation(
+        &self,
+        conversation_uuid: [u8; 16],
+    ) -> Result<ConversationRecord, StorageError> {
+        let now = unix_timestamp()?;
+        self.connection
+            .execute(
+                "INSERT OR IGNORE INTO conversations (
+                    conversation_uuid, created_at, updated_at
+                ) VALUES (?1, ?2, ?2)",
+                params![&conversation_uuid[..], now],
+            )
+            .map_err(StorageError::Repository)?;
+
+        self.get_conversation(conversation_uuid)?
+            .ok_or_else(|| StorageError::Repository(rusqlite::Error::QueryReturnedNoRows))
+    }
+
+    /// Fetch persisted conversation metadata by conversation UUID.
+    pub fn get_conversation(
+        &self,
+        conversation_uuid: [u8; 16],
+    ) -> Result<Option<ConversationRecord>, StorageError> {
+        self.connection
+            .query_row(
+                "SELECT conversation_uuid, created_at, updated_at
+                 FROM conversations
+                 WHERE conversation_uuid = ?1",
+                params![&conversation_uuid[..]],
+                row_to_conversation,
+            )
+            .optional()
+            .map_err(StorageError::Repository)
+    }
+
+    /// List known conversations in deterministic update order.
+    pub fn list_conversations(&self) -> Result<Vec<ConversationRecord>, StorageError> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT conversation_uuid, created_at, updated_at
+                 FROM conversations
+                 ORDER BY updated_at DESC, created_at DESC, conversation_uuid",
+            )
+            .map_err(StorageError::Repository)?;
+
+        let conversations = statement
+            .query_map([], row_to_conversation)
+            .map_err(StorageError::Repository)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StorageError::Repository)?;
+        Ok(conversations)
+    }
+
     /// Idempotently persist one accepted chat message and its conversation row.
     pub fn insert_accepted_chat_message(
         &self,
@@ -376,6 +439,15 @@ impl Storage {
         &self,
         conversation_uuid: [u8; 16],
     ) -> Result<Vec<AcceptedChatMessageRecord>, StorageError> {
+        let messages = self.accepted_messages_by_conversation_fallback_order(conversation_uuid)?;
+        order_message_chain(messages)
+    }
+
+    /// Fetch accepted messages for a conversation in stable fallback order.
+    pub fn accepted_messages_by_conversation_fallback_order(
+        &self,
+        conversation_uuid: [u8; 16],
+    ) -> Result<Vec<AcceptedChatMessageRecord>, StorageError> {
         let mut statement = self
             .connection
             .prepare(
@@ -410,8 +482,7 @@ impl Storage {
                     .and_then(validate_accepted_chat_message)
             })
             .collect::<Result<Vec<_>, _>>()?;
-
-        order_message_chain(messages)
+        Ok(messages)
     }
 }
 
@@ -531,6 +602,14 @@ fn row_to_message_ack(row: &rusqlite::Row<'_>) -> rusqlite::Result<MessageAckRec
         })?,
         signature: row.get(3)?,
         acknowledged_at: row.get(4)?,
+    })
+}
+
+fn row_to_conversation(row: &rusqlite::Row<'_>) -> rusqlite::Result<ConversationRecord> {
+    Ok(ConversationRecord {
+        conversation_uuid: vec_to_message_uuid(row.get(0)?).map_err(storage_error_to_sql_error)?,
+        created_at: row.get(1)?,
+        updated_at: row.get(2)?,
     })
 }
 
