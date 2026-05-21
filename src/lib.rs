@@ -1,4 +1,5 @@
 pub mod codec;
+pub mod cli;
 pub mod config;
 pub mod conversation_engine;
 pub mod crypto;
