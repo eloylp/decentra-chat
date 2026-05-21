@@ -1,4 +1,5 @@
 use pgp::composed::key::SecretKeyParamsBuilder;
+use pgp::composed::message::Message;
 use pgp::composed::{KeyType, SignedPublicKey, SignedSecretKey};
 use pgp::crypto::hash::HashAlgorithm;
 use pgp::crypto::sym::SymmetricKeyAlgorithm;
@@ -19,6 +20,12 @@ pub enum CryptoError {
     Sign(String),
     #[error("signature verification failed")]
     BadSignature,
+    #[error("encryption failed: {0}")]
+    Encrypt(String),
+    #[error("decryption failed: {0}")]
+    Decrypt(String),
+    #[error("decrypted payload did not contain literal data")]
+    MissingLiteralData,
 }
 
 /// A generated PGP identity keypair for DecentraChat.
@@ -33,6 +40,7 @@ impl KeyPair {
         let params = SecretKeyParamsBuilder::default()
             .key_type(KeyType::Rsa(2048))
             .can_sign(true)
+            .can_encrypt(true)
             .primary_user_id("decentra-chat".into())
             .preferred_hash_algorithms(vec![HashAlgorithm::SHA2_256].into())
             .preferred_symmetric_algorithms(vec![SymmetricKeyAlgorithm::AES256].into())
@@ -142,6 +150,38 @@ pub fn verify(
         .map_err(|_| CryptoError::BadSignature)
 }
 
+/// Encrypt payload bytes as an OpenPGP literal message for one peer public key.
+pub fn encrypt_for_peer(
+    key: &SignedPublicKey,
+    plaintext: &[u8],
+) -> Result<Vec<u8>, CryptoError> {
+    let literal = Message::new_literal_bytes("", plaintext);
+    let encrypted = literal
+        .encrypt_to_keys_seipdv1(rand::thread_rng(), SymmetricKeyAlgorithm::AES256, &[key])
+        .map_err(|e| CryptoError::Encrypt(e.to_string()))?;
+
+    encrypted
+        .to_bytes()
+        .map_err(|e| CryptoError::Serialize(e.to_string()))
+}
+
+/// Decrypt an OpenPGP-encrypted literal message with the local secret key.
+pub fn decrypt_from_peer(
+    key: &SignedSecretKey,
+    ciphertext: &[u8],
+) -> Result<Vec<u8>, CryptoError> {
+    let encrypted =
+        Message::from_bytes(ciphertext).map_err(|e| CryptoError::Deserialize(e.to_string()))?;
+    let (decrypted, _) = encrypted
+        .decrypt(|| String::new(), &[key])
+        .map_err(|e| CryptoError::Decrypt(e.to_string()))?;
+
+    decrypted
+        .get_content()
+        .map_err(|e| CryptoError::Decrypt(e.to_string()))?
+        .ok_or(CryptoError::MissingLiteralData)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -199,5 +239,14 @@ mod tests {
             verify(&keypair.public, &tampered, &signature),
             Err(CryptoError::BadSignature)
         ));
+    }
+
+    #[test]
+    fn payload_encrypts_and_decrypts_with_generated_keypair() {
+        let keypair = KeyPair::generate().unwrap();
+        let encrypted = encrypt_for_peer(&keypair.public, MESSAGE).unwrap();
+
+        assert_ne!(encrypted, MESSAGE);
+        assert_eq!(decrypt_from_peer(&keypair.secret, &encrypted).unwrap(), MESSAGE);
     }
 }
