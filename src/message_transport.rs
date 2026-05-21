@@ -1,7 +1,8 @@
 use crate::{
-    codec::{self, ChatMessage, Message},
+    codec::{self, ChatMessage, Message, MessageAck},
     crypto,
     discovery::Fingerprint,
+    storage::{MessageAckRecord, MessageAckUpsert, Storage, StorageError},
 };
 use pgp::composed::{SignedPublicKey, SignedSecretKey};
 use rand::RngCore;
@@ -59,6 +60,22 @@ pub struct ReceivedChatMessage {
     pub message_hash: [u8; 32],
 }
 
+/// Verified type-5 acknowledgement for a previously sent type-4 message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReceivedMessageAck {
+    pub message_uuid: [u8; 16],
+    pub message_hash: [u8; 32],
+    pub acknowledger: Fingerprint,
+    pub signature: Vec<u8>,
+}
+
+/// Sent chat message plus the persisted ACK received from the peer.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AcknowledgedChatMessage {
+    pub message: ChatMessage,
+    pub ack: MessageAckRecord,
+}
+
 /// Running TCP receiver for encrypted signed type-4 messages.
 pub struct ChatMessageService {
     local_addr: SocketAddr,
@@ -95,8 +112,12 @@ pub enum ChatTransportError {
     Codec(#[from] codec::CodecError),
     #[error("expected chat message, received {received}")]
     UnexpectedMessage { received: &'static str },
+    #[error("expected message ack, received {received}")]
+    UnexpectedAck { received: &'static str },
     #[error("chat message version {version} is unsupported")]
     UnsupportedVersion { version: u8 },
+    #[error("message ack version {version} is unsupported")]
+    UnsupportedAckVersion { version: u8 },
     #[error("chat message conversation type {conv_type} is unsupported")]
     UnsupportedConversationType { conv_type: u8 },
     #[error("chat message id is not a UUID v4")]
@@ -109,16 +130,26 @@ pub enum ChatTransportError {
     SourceMismatch,
     #[error("chat message destination fingerprint did not match local identity")]
     DestinationMismatch,
+    #[error("message ack uuid did not match the sent message")]
+    AckMessageUuidMismatch,
+    #[error("message ack hash did not match the sent message")]
+    AckMessageHashMismatch,
+    #[error("message ack acknowledger fingerprint did not match expected peer")]
+    AckAcknowledgerMismatch,
     #[error("chat message timestamp is outside the accepted window")]
     TimestampOutOfWindow,
     #[error("chat headers are too large: {len} bytes, max 65535")]
     HeadersTooLarge { len: usize },
     #[error("chat message signature verification failed: {0}")]
     Signature(#[source] crypto::CryptoError),
+    #[error("message ack signature verification failed: {0}")]
+    AckSignature(#[source] crypto::CryptoError),
     #[error("chat payload encryption failed: {0}")]
     Encrypt(#[source] crypto::CryptoError),
     #[error("chat payload decryption failed: {0}")]
     Decrypt(#[source] crypto::CryptoError),
+    #[error("failed to persist message ack: {0}")]
+    Storage(#[from] StorageError),
     #[error("system clock is before the Unix epoch")]
     InvalidSystemTime,
 }
@@ -190,6 +221,43 @@ pub async fn send_chat_message(
     Ok(message)
 }
 
+/// Send one type-4 chat message, wait for its type-5 ACK, verify it, and store
+/// the delivery state in SQLite.
+pub async fn send_chat_message_and_record_ack(
+    peer_addr: SocketAddr,
+    local: &LocalChatIdentity,
+    peer: &PeerChatIdentity,
+    outgoing: OutgoingChatMessage,
+    storage: &Storage,
+) -> Result<AcknowledgedChatMessage, ChatTransportError> {
+    let message = build_chat_message(local, peer, outgoing)?;
+    let mut stream = TcpStream::connect(peer_addr)
+        .await
+        .map_err(|source| ChatTransportError::Connect {
+            addr: peer_addr,
+            source,
+        })?;
+
+    write_message(&mut stream, Message::ChatMessage(message.clone())).await?;
+
+    let response = read_message(&mut stream).await?;
+    let Message::MessageAck(ack) = response else {
+        return Err(ChatTransportError::UnexpectedAck {
+            received: message_name(&response),
+        });
+    };
+    let received_ack = accept_message_ack(ack, &message, peer)?;
+    let ack = storage.upsert_message_ack(MessageAckUpsert {
+        message_uuid: received_ack.message_uuid,
+        message_hash: received_ack.message_hash,
+        acknowledger: received_ack.acknowledger,
+        signature: received_ack.signature,
+        acknowledged_at: unix_timestamp()?,
+    })?;
+
+    Ok(AcknowledgedChatMessage { message, ack })
+}
+
 /// Verify, decrypt, and hash a received type-4 chat message.
 pub fn accept_chat_message(
     message: ChatMessage,
@@ -217,6 +285,26 @@ pub fn accept_chat_message(
         headers: message.headers,
         plaintext,
         message_hash,
+    })
+}
+
+/// Verify a received type-5 ACK against the original sent chat message.
+pub fn accept_message_ack(
+    ack: MessageAck,
+    sent: &ChatMessage,
+    peer: &PeerChatIdentity,
+) -> Result<ReceivedMessageAck, ChatTransportError> {
+    validate_message_ack(&ack, sent, peer)?;
+
+    let signature_digest = message_ack_signature_digest(&ack);
+    crypto::verify(&peer.public_key, &signature_digest, &ack.signature)
+        .map_err(ChatTransportError::AckSignature)?;
+
+    Ok(ReceivedMessageAck {
+        message_uuid: ack.uuid,
+        message_hash: ack.message_hash,
+        acknowledger: ack.acknowledger,
+        signature: ack.signature,
     })
 }
 
@@ -300,7 +388,11 @@ async fn handle_connection(
         });
     };
 
-    accept_chat_message(message, local, peer, expected_previous_hash)
+    let received = accept_chat_message(message, local, peer, expected_previous_hash)?;
+    let ack = build_message_ack(local, &received)?;
+    let _ = write_message(&mut stream, Message::MessageAck(ack)).await;
+
+    Ok(received)
 }
 
 fn validate_chat_message(
@@ -340,6 +432,47 @@ fn validate_chat_message(
     Ok(())
 }
 
+fn build_message_ack(
+    local: &LocalChatIdentity,
+    received: &ReceivedChatMessage,
+) -> Result<MessageAck, ChatTransportError> {
+    let mut ack = MessageAck {
+        version: WIRE_CHAT_VERSION,
+        uuid: received.uuid,
+        message_hash: received.message_hash,
+        acknowledger: local.fingerprint,
+        signature: Vec::new(),
+    };
+    let signature_digest = message_ack_signature_digest(&ack);
+    ack.signature = crypto::sign(&local.secret_key, &signature_digest)
+        .map_err(ChatTransportError::AckSignature)?;
+
+    Ok(ack)
+}
+
+fn validate_message_ack(
+    ack: &MessageAck,
+    sent: &ChatMessage,
+    peer: &PeerChatIdentity,
+) -> Result<(), ChatTransportError> {
+    if ack.version != WIRE_CHAT_VERSION {
+        return Err(ChatTransportError::UnsupportedAckVersion {
+            version: ack.version,
+        });
+    }
+    if ack.uuid != sent.uuid {
+        return Err(ChatTransportError::AckMessageUuidMismatch);
+    }
+    let sent_hash: [u8; 32] = Sha256::digest(Vec::<u8>::from(sent.clone())).into();
+    if ack.message_hash != sent_hash {
+        return Err(ChatTransportError::AckMessageHashMismatch);
+    }
+    if ack.acknowledger != peer.fingerprint {
+        return Err(ChatTransportError::AckAcknowledgerMismatch);
+    }
+    Ok(())
+}
+
 fn chat_message_signed_bytes(message: &ChatMessage) -> Vec<u8> {
     let mut out = Vec::new();
     out.push(message.version);
@@ -359,6 +492,19 @@ fn chat_message_signed_bytes(message: &ChatMessage) -> Vec<u8> {
 
 fn chat_message_signature_digest(message: &ChatMessage) -> [u8; 32] {
     Sha256::digest(chat_message_signed_bytes(message)).into()
+}
+
+fn message_ack_signed_bytes(ack: &MessageAck) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.push(ack.version);
+    out.extend_from_slice(&ack.uuid);
+    out.extend_from_slice(&ack.message_hash);
+    out.extend_from_slice(&ack.acknowledger);
+    out
+}
+
+fn message_ack_signature_digest(ack: &MessageAck) -> [u8; 32] {
+    Sha256::digest(message_ack_signed_bytes(ack)).into()
 }
 
 async fn read_message(stream: &mut TcpStream) -> Result<Message, ChatTransportError> {
@@ -465,6 +611,7 @@ fn message_name(message: &Message) -> &'static str {
 mod tests {
     use super::*;
     use crate::crypto::{fingerprint, public_key_to_bytes, KeyPair};
+    use crate::storage::Storage;
     use std::net::{IpAddr, Ipv4Addr};
     use tokio::time::{timeout, Duration};
 
@@ -550,6 +697,56 @@ mod tests {
         assert_ne!(sent.data, b"hello bob");
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn loopback_ack_records_delivery_state() {
+        let (alice_local, bob_peer, bob_local, alice_peer) = identities();
+        let previous_hash = [0x62; 32];
+        let mut receiver = ChatMessageService::start(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+            bob_local,
+            alice_peer,
+            previous_hash,
+        )
+        .await
+        .expect("start chat receiver");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = Storage::open(dir.path().join("sender.sqlite3")).expect("open storage");
+
+        let acknowledged = timeout(
+            Duration::from_secs(10),
+            send_chat_message_and_record_ack(
+                receiver.local_addr(),
+                &alice_local,
+                &bob_peer,
+                OutgoingChatMessage {
+                    conversation_uuid: uuid_v4(0x71),
+                    previous_hash,
+                    headers: b"Content-Type: text/plain".to_vec(),
+                    plaintext: b"ack me".to_vec(),
+                },
+                &storage,
+            ),
+        )
+        .await
+        .expect("send and ack should finish")
+        .expect("send and record ack");
+        let received = timeout(Duration::from_secs(10), receiver.recv())
+            .await
+            .expect("receive should finish")
+            .expect("accepted message");
+        let stored = storage
+            .get_message_ack(acknowledged.message.uuid, bob_peer.fingerprint)
+            .expect("fetch message ack")
+            .expect("stored ack");
+
+        assert_eq!(received.uuid, acknowledged.message.uuid);
+        assert_eq!(acknowledged.ack, stored);
+        assert_eq!(stored.message_uuid, acknowledged.message.uuid);
+        assert_eq!(stored.message_hash, received.message_hash);
+        assert_eq!(stored.acknowledger, bob_peer.fingerprint);
+        assert!(!stored.signature.is_empty());
+    }
+
     #[test]
     fn invalid_signature_is_rejected_before_decryption() {
         let (alice_local, bob_peer, bob_local, alice_peer) = identities();
@@ -592,5 +789,40 @@ mod tests {
             .expect_err("wrong previous hash should be rejected");
 
         assert!(matches!(error, ChatTransportError::PreviousHashMismatch));
+    }
+
+    #[test]
+    fn ack_signature_must_verify_with_acknowledger_key() {
+        let (alice_local, bob_peer, bob_local, _alice_peer) = identities();
+        let message = build_chat_message(
+            &alice_local,
+            &bob_peer,
+            OutgoingChatMessage {
+                conversation_uuid: uuid_v4(0x73),
+                previous_hash: [0x81; 32],
+                headers: Vec::new(),
+                plaintext: b"delivery proof".to_vec(),
+            },
+        )
+        .expect("build message");
+        let message_hash = Sha256::digest(Vec::<u8>::from(message.clone())).into();
+        let received = ReceivedChatMessage {
+            uuid: message.uuid,
+            conversation_uuid: message.conv_uuid,
+            previous_hash: message.prev_hash,
+            timestamp: message.timestamp,
+            source: alice_local.fingerprint,
+            destination: bob_peer.fingerprint,
+            headers: message.headers.clone(),
+            plaintext: b"delivery proof".to_vec(),
+            message_hash,
+        };
+        let mut ack = build_message_ack(&bob_local, &received).expect("build ack");
+        ack.signature[0] ^= 0xff;
+
+        let error = accept_message_ack(ack, &message, &bob_peer)
+            .expect_err("tampered ack signature should be rejected");
+
+        assert!(matches!(error, ChatTransportError::AckSignature(_)));
     }
 }
