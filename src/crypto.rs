@@ -72,6 +72,19 @@ pub fn public_key_from_bytes(bytes: &[u8]) -> Result<SignedPublicKey, CryptoErro
     SignedPublicKey::from_bytes(bytes).map_err(|e| CryptoError::Deserialize(e.to_string()))
 }
 
+/// Serialize a secret key to raw bytes for local CLI identity files.
+pub fn secret_key_to_bytes(key: &SignedSecretKey) -> Result<Vec<u8>, CryptoError> {
+    let mut bytes = Vec::new();
+    key.to_writer(&mut bytes)
+        .map_err(|e| CryptoError::Serialize(e.to_string()))?;
+    Ok(bytes)
+}
+
+/// Deserialize a local secret key from raw bytes.
+pub fn secret_key_from_bytes(bytes: &[u8]) -> Result<SignedSecretKey, CryptoError> {
+    SignedSecretKey::from_bytes(bytes).map_err(|e| CryptoError::Deserialize(e.to_string()))
+}
+
 /// DC fingerprint: SHA256(serialized_pub_key_bytes) -> fixed 32-byte array.
 pub fn fingerprint(pub_key_bytes: &[u8]) -> [u8; 32] {
     Sha256::digest(pub_key_bytes).into()

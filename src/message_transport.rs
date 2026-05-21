@@ -56,6 +56,7 @@ pub struct ReceivedChatMessage {
     pub source: Fingerprint,
     pub destination: Fingerprint,
     pub headers: Vec<u8>,
+    pub encrypted_payload: Vec<u8>,
     pub plaintext: Vec<u8>,
     pub message_hash: [u8; 32],
 }
@@ -270,6 +271,7 @@ pub fn accept_chat_message(
         source: message.source,
         destination: message.destination,
         headers: message.headers,
+        encrypted_payload: message.data,
         plaintext,
         message_hash,
     })
