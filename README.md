@@ -17,114 +17,32 @@ cargo build
 ## Test
 
 ```sh
-cargo test
+RUST_MIN_STACK=16777216 cargo test
 ```
 
 ## Quickstart
 
-Inspect the non-secret node configuration and initialize the local SQLite storage:
+Start by checking the effective configuration and initializing the local SQLite
+store:
 
 ```sh
 cargo run -- status
 ```
 
-Use a specific config file:
+Use `--config` when you want an isolated node profile:
 
 ```sh
 cargo run -- --config ./config.toml status
 ```
 
-Show the current command surface:
+For a complete loopback walkthrough with two local identities, key exchange,
+message send/receive, delivery state, and conversation history, follow the
+[CLI user guide](docs/CLI_GUIDE.md).
+
+Show the command surface at any time:
 
 ```sh
 cargo run -- --help
-```
-
-Run a bounded local peer discovery session and print the visible peers:
-
-```sh
-cargo run -- discover --duration-ms 5000 --announce-interval-ms 1000 --nick local --fingerprint 0000000000000000000000000000000000000000000000000000000000000000
-```
-
-When testing multicast loopback on one machine, bind discovery to loopback explicitly:
-
-```sh
-cargo run -- --config ./config.toml discover --multicast-interface 127.0.0.1 --listen-port 51001 --duration-ms 3000
-```
-
-Generate two local identities:
-
-```sh
-cargo run -- keygen --secret-key ./alice.secret --public-key ./alice.public
-cargo run -- keygen --secret-key ./bob.secret --public-key ./bob.public
-```
-
-Create separate local configs and SQLite stores for the loopback example:
-
-```sh
-cat > alice.toml <<'EOF'
-multicast_group = "239.255.40.91"
-discovery_port = 40091
-listen_addr = "127.0.0.1"
-storage_path = "./alice.sqlite3"
-EOF
-cat > bob.toml <<'EOF'
-multicast_group = "239.255.40.91"
-discovery_port = 40091
-listen_addr = "127.0.0.1"
-storage_path = "./bob.sqlite3"
-EOF
-```
-
-In terminal 1, serve Bob's public key:
-
-```sh
-cargo run -- key-serve --public-key ./bob.public --listen 127.0.0.1:52002 --duration-ms 30000
-```
-
-In terminal 2, request and store Bob's key in Alice's configured storage:
-
-```sh
-cargo run -- --config ./alice.toml key-request --peer 127.0.0.1:52002
-```
-
-Then serve Alice's public key:
-
-```sh
-cargo run -- key-serve --public-key ./alice.public --listen 127.0.0.1:52002 --duration-ms 30000
-```
-
-And request it into Bob's configured storage:
-
-```sh
-cargo run -- --config ./bob.toml key-request --peer 127.0.0.1:52002
-```
-
-Use the fingerprint printed by `keygen` or `key-request` as `BOB_FINGERPRINT`.
-Use Alice's fingerprint as `ALICE_FINGERPRINT`.
-
-In terminal 1, receive one encrypted message as Bob:
-
-```sh
-cargo run -- --config ./bob.toml receive --secret-key ./bob.secret --peer-fingerprint ALICE_FINGERPRINT --listen 127.0.0.1:52003 --duration-ms 30000
-```
-
-In terminal 2, send one encrypted signed message as Alice and persist the ACK:
-
-```sh
-cargo run -- --config ./alice.toml send --secret-key ./alice.secret --peer-fingerprint BOB_FINGERPRINT --peer 127.0.0.1:52003 --conversation 11111111-1111-4111-8111-111111111111 "hello bob"
-```
-
-List conversations stored in Alice's local database:
-
-```sh
-cargo run -- --config ./alice.toml conversations
-```
-
-Show the ordered message history for a conversation, including delivery and reply-validation state:
-
-```sh
-cargo run -- --config ./alice.toml history --conversation 11111111-1111-4111-8111-111111111111
 ```
 
 ## Protocol and architecture
@@ -132,6 +50,8 @@ cargo run -- --config ./alice.toml history --conversation 11111111-1111-4111-811
 The full protocol design — peer discovery, key exchange, message format, acknowledgement, and ordering — is documented in [PAPER.md](PAPER.md).
 
 The implemented v0.3 conversation read model is documented in [docs/CONVERSATION_ENGINE.md](docs/CONVERSATION_ENGINE.md).
+
+The implemented CLI workflows are documented in [docs/CLI_GUIDE.md](docs/CLI_GUIDE.md).
 
 ## Contributing
 
