@@ -1,4 +1,5 @@
 use pgp::composed::key::SecretKeyParamsBuilder;
+use pgp::composed::message::Message;
 use pgp::composed::{KeyType, SignedPublicKey, SignedSecretKey};
 use pgp::crypto::hash::HashAlgorithm;
 use pgp::crypto::sym::SymmetricKeyAlgorithm;
@@ -19,6 +20,38 @@ pub enum CryptoError {
     Sign(String),
     #[error("signature verification failed")]
     BadSignature,
+    #[error("encryption failed: {0}")]
+    Encrypt(String),
+    #[error("decryption failed: {0}")]
+    Decrypt(String),
+}
+
+/// Encrypt plaintext to a peer public key using rpgp's public-key message format.
+pub fn encrypt(key: &SignedPublicKey, plaintext: &[u8]) -> Result<Vec<u8>, CryptoError> {
+    let mut rng = rand::thread_rng();
+    let message = Message::new_literal_bytes("", plaintext)
+        .encrypt_to_keys_seipdv1(&mut rng, SymmetricKeyAlgorithm::AES256, &[key])
+        .map_err(|e| CryptoError::Encrypt(e.to_string()))?;
+
+    let mut bytes = Vec::new();
+    message
+        .to_writer(&mut bytes)
+        .map_err(|e| CryptoError::Serialize(e.to_string()))?;
+    Ok(bytes)
+}
+
+/// Decrypt ciphertext with the local secret key and return the literal bytes.
+pub fn decrypt(key: &SignedSecretKey, ciphertext: &[u8]) -> Result<Vec<u8>, CryptoError> {
+    let message =
+        Message::from_bytes(ciphertext).map_err(|e| CryptoError::Decrypt(e.to_string()))?;
+    let decrypted = message
+        .decrypt(|| String::new(), &[key])
+        .map_err(|e| CryptoError::Decrypt(e.to_string()))?;
+    decrypted
+        .0
+        .get_content()
+        .map_err(|e| CryptoError::Decrypt(e.to_string()))?
+        .ok_or_else(|| CryptoError::Decrypt("decrypted message did not contain literal data".into()))
 }
 
 /// A generated PGP identity keypair for DecentraChat.
@@ -154,6 +187,17 @@ mod tests {
         let signature = sign(&keypair.secret, MESSAGE).unwrap();
 
         verify(&keypair.public, MESSAGE, &signature).unwrap();
+    }
+
+    #[test]
+    fn generated_keypair_encrypts_and_decrypts() {
+        let keypair = KeyPair::generate().unwrap();
+        let ciphertext = encrypt(&keypair.public, MESSAGE).unwrap();
+
+        let plaintext = decrypt(&keypair.secret, &ciphertext).unwrap();
+
+        assert_eq!(plaintext, MESSAGE);
+        assert_ne!(ciphertext, MESSAGE);
     }
 
     #[test]
