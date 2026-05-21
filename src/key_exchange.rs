@@ -12,7 +12,7 @@ use thiserror::Error;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
-    task::JoinHandle,
+    task::{JoinHandle, JoinSet},
 };
 
 const WIRE_KEY_EXCHANGE_VERSION: u8 = 1;
@@ -150,14 +150,21 @@ pub async fn request_peer_key(
 }
 
 async fn listener_loop(listener: TcpListener, local_key: LocalKeyMaterial) {
+    let mut connections = JoinSet::new();
+
     loop {
-        let Ok((stream, _peer_addr)) = listener.accept().await else {
-            continue;
-        };
-        let local_key = local_key.clone();
-        tokio::spawn(async move {
-            let _ = handle_connection(stream, local_key).await;
-        });
+        tokio::select! {
+            accept_result = listener.accept() => {
+                let Ok((stream, _peer_addr)) = accept_result else {
+                    continue;
+                };
+                let local_key = local_key.clone();
+                connections.spawn(async move {
+                    let _ = handle_connection(stream, local_key).await;
+                });
+            }
+            Some(_result) = connections.join_next() => {}
+        }
     }
 }
 
@@ -284,6 +291,7 @@ mod tests {
     use super::*;
     use crate::crypto::{public_key_to_bytes, KeyPair};
     use std::net::{IpAddr, Ipv4Addr};
+    use tokio::io::AsyncReadExt;
     use tokio::time::{timeout, Duration};
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -357,6 +365,47 @@ mod tests {
             }
         ));
         server.await.expect("server task");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dropping_service_cancels_stalled_connection_handlers() {
+        let responder_keypair = KeyPair::generate().expect("generate responder keypair");
+        let responder_public_key =
+            public_key_to_bytes(&responder_keypair.public).expect("serialize responder key");
+        let local_key = LocalKeyMaterial::from_public_key(responder_public_key).expect("local key");
+        let responder = KeyExchangeService::start(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+            local_key,
+        )
+        .await
+        .expect("start key-exchange responder");
+
+        let mut stalled_stream = TcpStream::connect(responder.local_addr())
+            .await
+            .expect("connect stalled peer");
+
+        drop(responder);
+
+        let mut byte = [0_u8; 1];
+        let read_result = timeout(Duration::from_secs(2), stalled_stream.read(&mut byte))
+            .await
+            .expect("service shutdown should close stalled connection");
+
+        match read_result {
+            Ok(0) => {}
+            Ok(n) => panic!("expected shutdown to close connection, read {n} byte(s)"),
+            Err(error) => {
+                assert!(
+                    matches!(
+                        error.kind(),
+                        std::io::ErrorKind::ConnectionReset
+                            | std::io::ErrorKind::ConnectionAborted
+                            | std::io::ErrorKind::BrokenPipe
+                    ),
+                    "unexpected read error after shutdown: {error}"
+                );
+            }
+        }
     }
 
     #[test]
