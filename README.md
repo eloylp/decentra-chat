@@ -35,9 +35,9 @@ Use `--config` when you want an isolated node profile:
 cargo run -- --config ./config.toml status
 ```
 
-For a complete loopback walkthrough with two local identities, key exchange,
-message send/receive, bounded chat sessions, delivery state, and conversation history, follow the
-[CLI user guide](docs/CLI_GUIDE.md).
+For a complete loopback walkthrough with two local identities, trusted contacts,
+peer onboarding, bounded chat sessions, delivery state, and conversation
+history, follow the [CLI user guide](docs/CLI_GUIDE.md).
 
 Show the command surface at any time:
 
