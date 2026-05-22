@@ -339,7 +339,7 @@ so test on the target LAN when possible.
 
 - Commands are intentionally bounded and exit after one operation or a fixed
   duration.
-- There is no TUI, background daemon, contact book, or automatic retry loop yet.
+- There is no TUI, background daemon, or automatic retry loop yet.
 - Discovery is local-network multicast. It does not cross routers without
   network support.
 - Conversation history is local storage state. It does not fetch missing
