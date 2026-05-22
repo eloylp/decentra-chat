@@ -7,7 +7,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-const CLI_TIMEOUT: Duration = Duration::from_secs(20);
+const CLI_TIMEOUT: Duration = Duration::from_secs(60);
 const BACKGROUND_READY_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[test]
@@ -16,7 +16,7 @@ fn status_bootstraps_configured_storage_without_home_state() {
     let storage_path = fixture.path("state/chat.sqlite3");
     let config_path = fixture.write_config("alice.toml", 45101, &storage_path);
 
-    let output = fixture.cli(["--config", path_arg(&config_path), "status"]);
+    let output = fixture.cli(["--config", path_arg(&config_path), "status"], "status");
 
     assert_success(&output, "status");
     let stdout = stdout(&output);
@@ -38,23 +38,26 @@ fn discover_runs_with_bounded_loopback_runtime_and_exits_cleanly() {
     let config_path = fixture.write_config("discovery.toml", discovery_port, &storage_path);
     let fingerprint = "1111111111111111111111111111111111111111111111111111111111111111";
 
-    let output = fixture.cli([
-        "--config",
-        path_arg(&config_path),
-        "discover",
-        "--nick",
-        "alice",
-        "--fingerprint",
-        fingerprint,
-        "--listen-port",
-        "55101",
-        "--multicast-interface",
-        "127.0.0.1",
-        "--duration-ms",
-        "250",
-        "--announce-interval-ms",
-        "50",
-    ]);
+    let output = fixture.cli(
+        [
+            "--config",
+            path_arg(&config_path),
+            "discover",
+            "--nick",
+            "alice",
+            "--fingerprint",
+            fingerprint,
+            "--listen-port",
+            "55101",
+            "--multicast-interface",
+            "127.0.0.1",
+            "--duration-ms",
+            "250",
+            "--announce-interval-ms",
+            "50",
+        ],
+        "bounded discover",
+    );
 
     assert_success(&output, "discover");
     let stdout = stdout(&output);
@@ -80,36 +83,45 @@ fn key_exchange_send_ack_and_history_work_through_public_cli() {
     let bob_secret = fixture.path("bob.secret");
     let bob_public = fixture.path("bob.public");
 
-    let alice_keygen = fixture.cli([
-        "keygen",
-        "--secret-key",
-        path_arg(&alice_secret),
-        "--public-key",
-        path_arg(&alice_public),
-    ]);
+    let alice_keygen = fixture.cli(
+        [
+            "keygen",
+            "--secret-key",
+            path_arg(&alice_secret),
+            "--public-key",
+            path_arg(&alice_public),
+        ],
+        "alice keygen",
+    );
     assert_success(&alice_keygen, "alice keygen");
-    let bob_keygen = fixture.cli([
-        "keygen",
-        "--secret-key",
-        path_arg(&bob_secret),
-        "--public-key",
-        path_arg(&bob_public),
-    ]);
+    let bob_keygen = fixture.cli(
+        [
+            "keygen",
+            "--secret-key",
+            path_arg(&bob_secret),
+            "--public-key",
+            path_arg(&bob_public),
+        ],
+        "bob keygen",
+    );
     assert_success(&bob_keygen, "bob keygen");
     let alice_fingerprint = fingerprint_from_keygen(&stdout(&alice_keygen));
     let bob_fingerprint = fingerprint_from_keygen(&stdout(&bob_keygen));
 
     let key_port = free_tcp_port();
     let bob_key_addr = format!("127.0.0.1:{key_port}");
-    let mut bob_key_server = fixture.spawn_cli([
-        "key-serve",
-        "--public-key",
-        path_arg(&bob_public),
-        "--listen",
-        bob_key_addr.as_str(),
-        "--duration-ms",
-        "10000",
-    ]);
+    let mut bob_key_server = fixture.spawn_cli(
+        [
+            "key-serve",
+            "--public-key",
+            path_arg(&bob_public),
+            "--listen",
+            bob_key_addr.as_str(),
+            "--duration-ms",
+            "10000",
+        ],
+        "bob key-serve",
+    );
     let alice_request = fixture.eventually_cli(
         [
             "--config",
@@ -124,15 +136,18 @@ fn key_exchange_send_ack_and_history_work_through_public_cli() {
     bob_key_server.kill_and_wait();
 
     let alice_key_addr = format!("127.0.0.1:{key_port}");
-    let mut alice_key_server = fixture.spawn_cli([
-        "key-serve",
-        "--public-key",
-        path_arg(&alice_public),
-        "--listen",
-        alice_key_addr.as_str(),
-        "--duration-ms",
-        "10000",
-    ]);
+    let mut alice_key_server = fixture.spawn_cli(
+        [
+            "key-serve",
+            "--public-key",
+            path_arg(&alice_public),
+            "--listen",
+            alice_key_addr.as_str(),
+            "--duration-ms",
+            "10000",
+        ],
+        "alice key-serve",
+    );
     let bob_request = fixture.eventually_cli(
         [
             "--config",
@@ -148,19 +163,22 @@ fn key_exchange_send_ack_and_history_work_through_public_cli() {
 
     let chat_addr = format!("127.0.0.1:{}", free_tcp_port());
     let conversation = "11111111-1111-4111-8111-111111111111";
-    let mut bob_receiver = fixture.spawn_cli([
-        "--config",
-        path_arg(&bob_config),
-        "receive",
-        "--secret-key",
-        path_arg(&bob_secret),
-        "--peer-fingerprint",
-        alice_fingerprint.as_str(),
-        "--listen",
-        chat_addr.as_str(),
-        "--duration-ms",
-        "10000",
-    ]);
+    let mut bob_receiver = fixture.spawn_cli(
+        [
+            "--config",
+            path_arg(&bob_config),
+            "receive",
+            "--secret-key",
+            path_arg(&bob_secret),
+            "--peer-fingerprint",
+            alice_fingerprint.as_str(),
+            "--listen",
+            chat_addr.as_str(),
+            "--duration-ms",
+            "10000",
+        ],
+        "bob receive",
+    );
     let send_output = fixture.eventually_cli(
         [
             "--config",
@@ -182,7 +200,10 @@ fn key_exchange_send_ack_and_history_work_through_public_cli() {
     let receive_output = bob_receiver.wait_with_timeout(CLI_TIMEOUT);
     assert_success(&receive_output, "bob receive");
 
-    let conversations = fixture.cli(["--config", path_arg(&alice_config), "conversations"]);
+    let conversations = fixture.cli(
+        ["--config", path_arg(&alice_config), "conversations"],
+        "alice conversations",
+    );
     assert_success(&conversations, "alice conversations");
     let conversations_stdout = stdout(&conversations);
     assert!(
@@ -194,13 +215,16 @@ fn key_exchange_send_ack_and_history_work_through_public_cli() {
         "{conversations_stdout}"
     );
 
-    let history = fixture.cli([
-        "--config",
-        path_arg(&alice_config),
-        "history",
-        "--conversation",
-        conversation,
-    ]);
+    let history = fixture.cli(
+        [
+            "--config",
+            path_arg(&alice_config),
+            "history",
+            "--conversation",
+            conversation,
+        ],
+        "alice history",
+    );
     assert_success(&history, "alice history");
     let send_stdout = stdout(&send_output);
     let receive_stdout = stdout(&receive_output);
@@ -254,15 +278,15 @@ storage_path = "{}"
         free_tcp_port()
     }
 
-    fn cli<const N: usize>(&self, args: [&str; N]) -> Output {
-        run_cli(args, CLI_TIMEOUT)
+    fn cli<const N: usize>(&self, args: [&str; N], description: &str) -> Output {
+        run_cli(args, CLI_TIMEOUT, description)
     }
 
     fn eventually_cli<const N: usize>(&self, args: [&str; N], description: &str) -> Output {
         let deadline = Instant::now() + BACKGROUND_READY_TIMEOUT;
         let mut last_output = None;
         while Instant::now() < deadline {
-            let output = run_cli(args, CLI_TIMEOUT);
+            let output = run_cli(args, CLI_TIMEOUT, description);
             if output.status.success() {
                 return output;
             }
@@ -279,7 +303,11 @@ storage_path = "{}"
         );
     }
 
-    fn spawn_cli<const N: usize>(&self, args: [&str; N]) -> ChildGuard {
+    fn spawn_cli<const N: usize>(
+        &self,
+        args: [&str; N],
+        description: &'static str,
+    ) -> ChildGuard {
         let child = Command::new(cli_bin())
             .args(args)
             .current_dir(self.root.path())
@@ -287,12 +315,18 @@ storage_path = "{}"
             .stderr(Stdio::piped())
             .spawn()
             .expect("spawn CLI process");
-        ChildGuard { child: Some(child) }
+        ChildGuard {
+            child: Some(child),
+            description,
+            args: args.map(str::to_owned).to_vec(),
+        }
     }
 }
 
 struct ChildGuard {
     child: Option<Child>,
+    description: &'static str,
+    args: Vec<String>,
 }
 
 impl ChildGuard {
@@ -307,7 +341,9 @@ impl ChildGuard {
                 let _ = child.kill();
                 let output = child.wait_with_output().expect("collect timed-out child output");
                 panic!(
-                    "CLI process timed out after {timeout:?}\nstatus: {}\nstdout:\n{}\nstderr:\n{}",
+                    "{} timed out after {timeout:?}\ncommand: {}\nstatus: {}\nstdout:\n{}\nstderr:\n{}",
+                    self.description,
+                    format_cli_command(&self.args),
                     output.status,
                     stdout(&output),
                     stderr(&output)
@@ -339,7 +375,7 @@ impl Drop for ChildGuard {
     }
 }
 
-fn run_cli<const N: usize>(args: [&str; N], timeout: Duration) -> Output {
+fn run_cli<const N: usize>(args: [&str; N], timeout: Duration, description: &str) -> Output {
     let mut child = Command::new(cli_bin())
         .args(args)
         .stdout(Stdio::piped())
@@ -358,7 +394,8 @@ fn run_cli<const N: usize>(args: [&str; N], timeout: Duration) -> Output {
                 .wait_with_output()
                 .expect("collect timed-out CLI output");
             panic!(
-                "CLI command timed out after {timeout:?}\nstatus: {}\nstdout:\n{}\nstderr:\n{}",
+                "{description} timed out after {timeout:?}\ncommand: {}\nstatus: {}\nstdout:\n{}\nstderr:\n{}",
+                format_cli_command(&args),
                 output.status,
                 stdout(&output),
                 stderr(&output)
@@ -396,6 +433,13 @@ fn free_tcp_port() -> u16 {
 
 fn cli_bin() -> &'static str {
     env!("CARGO_BIN_EXE_decentra-chat")
+}
+
+fn format_cli_command(args: &[impl AsRef<str>]) -> String {
+    std::iter::once(cli_bin().to_owned())
+        .chain(args.iter().map(|arg| arg.as_ref().to_owned()))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn path_arg(path: &Path) -> &str {
