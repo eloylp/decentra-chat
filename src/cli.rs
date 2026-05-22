@@ -21,16 +21,20 @@ use crate::{
 use clap::{CommandFactory, Parser, Subcommand};
 use pgp::composed::SignedSecretKey;
 use rand::RngCore;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::{
     collections::HashMap,
     ffi::OsString,
     fs,
     io::{self, Write},
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     path::PathBuf,
     time::{Duration, Instant},
 };
 use thiserror::Error;
+use tokio::{
+    io::{AsyncBufReadExt, BufReader},
+    pin,
+};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -66,6 +70,8 @@ pub enum CliCommand {
     Receive(ReceiveArgs),
     /// Send one encrypted signed message to a known peer and persist its ACK.
     Send(SendArgs),
+    /// Run a bounded stdin-driven chat session with one trusted contact.
+    Chat(ChatArgs),
     /// List known conversations in local storage.
     Conversations,
     /// Show ordered message history for one conversation.
@@ -196,6 +202,28 @@ pub struct SendArgs {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, clap::Args)]
+pub struct ChatArgs {
+    /// Path to the serialized local secret key.
+    #[arg(long, value_name = "PATH")]
+    secret_key: PathBuf,
+    /// Trusted contact alias or fingerprint to chat with.
+    #[arg(long, value_name = "FINGERPRINT_OR_ALIAS")]
+    contact: String,
+    /// TCP peer address accepting chat messages.
+    #[arg(long, value_name = "ADDR")]
+    peer: SocketAddr,
+    /// TCP address used to receive chat messages during the session.
+    #[arg(long, value_name = "ADDR")]
+    listen: SocketAddr,
+    /// Conversation UUID as 32 hex characters or canonical hyphenated UUID.
+    #[arg(long, value_name = "UUID")]
+    conversation: String,
+    /// Bounded session length in milliseconds.
+    #[arg(long, default_value_t = 30_000)]
+    duration_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, clap::Args)]
 pub struct HistoryArgs {
     /// Conversation UUID as 32 hex characters or canonical hyphenated UUID.
     #[arg(long, value_name = "UUID")]
@@ -264,6 +292,10 @@ pub enum CliError {
         "contact `{query}` is not in local storage; run `contact add --alias <ALIAS> --fingerprint <HEX>` first"
     )]
     MissingContact { query: String },
+    #[error("contact `{alias}` is not trusted; run `contact trust {alias}` after verifying the fingerprint")]
+    ContactNotTrusted { alias: String },
+    #[error("contact `{alias}` has no stored public key; run `onboard --alias {alias} ...` or `key-request --peer <ADDR>` first")]
+    ContactMissingPublicKey { alias: String },
     #[error(
         "contact alias `{alias}` is already pinned to fingerprint {existing_fingerprint}; refusing to replace it with {new_fingerprint}"
     )]
@@ -316,6 +348,10 @@ pub enum CliError {
     InvalidKeyServeDuration,
     #[error("receive duration must be greater than zero")]
     InvalidReceiveDuration,
+    #[error("chat duration must be greater than zero")]
+    InvalidChatDuration,
+    #[error("failed to read chat stdin: {0}")]
+    ReadStdin(#[source] io::Error),
     #[error("invalid message hash: {0}")]
     InvalidMessageHash(String),
     #[error("invalid conversation UUID: {0}")]
@@ -407,6 +443,10 @@ pub fn run<W: Write>(cli: Cli, mut writer: W) -> Result<(), CliError> {
         CliCommand::Send(args) => {
             let runtime = runtime()?;
             runtime.block_on(run_send(cli.config_path(), args, &mut writer))?;
+        }
+        CliCommand::Chat(args) => {
+            let runtime = runtime()?;
+            runtime.block_on(run_chat(cli.config_path(), args, &mut writer))?;
         }
         CliCommand::Conversations => run_conversations(cli.config_path(), &mut writer)?,
         CliCommand::History(args) => run_history(cli.config_path(), args, &mut writer)?,
@@ -743,6 +783,156 @@ async fn run_send<W: Write>(
     Ok(())
 }
 
+async fn run_chat<W: Write>(
+    config_path: PathBuf,
+    args: ChatArgs,
+    writer: &mut W,
+) -> Result<(), CliError> {
+    if args.duration_ms == 0 {
+        return Err(CliError::InvalidChatDuration);
+    }
+
+    let conversation_uuid = parse_uuid(&args.conversation)?;
+    let storage = open_storage(config_path)?;
+    let local = load_local_identity(&args.secret_key)?;
+    let contact = find_contact(&storage, &args.contact)?;
+    require_trusted_contact(&contact)?;
+    let peer = load_peer_identity_from_fingerprint(&storage, contact.fingerprint)?;
+    storage
+        .ensure_conversation(conversation_uuid)
+        .map_err(CliError::PersistMessage)?;
+
+    let mut history = chat_history(&storage, conversation_uuid)?;
+    writeln!(
+        writer,
+        "chat: conversation_uuid={} contact={} fingerprint={} messages={}",
+        uuid_hex(&conversation_uuid),
+        contact.alias,
+        fingerprint_hex(&contact.fingerprint),
+        history.len()
+    )?;
+    writeln!(
+        writer,
+        "message_uuid\tsender_fingerprint\ttimestamp\tdelivery_state\treply_state\tpayload"
+    )?;
+    for message in &history {
+        write_history_message(writer, message)?;
+    }
+
+    let mut latest_hash = history
+        .last()
+        .map(|message| message.message_hash)
+        .unwrap_or([0; 32]);
+    let mut service =
+        ChatMessageService::start(args.listen, local.clone(), peer.clone(), latest_hash).await?;
+    writeln!(
+        writer,
+        "chat: listening on {} for {} ms",
+        service.local_addr(),
+        args.duration_ms
+    )?;
+    writeln!(writer, "chat: enter one plaintext message per stdin line")?;
+
+    let deadline = tokio::time::sleep(Duration::from_millis(args.duration_ms));
+    pin!(deadline);
+    let stdin = BufReader::new(tokio::io::stdin());
+    let mut lines = stdin.lines();
+    let mut stdin_done = false;
+    let mut sent = 0_u64;
+    let mut received_count = 0_u64;
+
+    loop {
+        tokio::select! {
+            _ = &mut deadline => {
+                break;
+            }
+            maybe_line = lines.next_line(), if !stdin_done => {
+                let maybe_line = maybe_line.map_err(CliError::ReadStdin)?;
+                let Some(line) = maybe_line else {
+                    stdin_done = true;
+                    continue;
+                };
+                if line.is_empty() {
+                    continue;
+                }
+
+                let (message, ack) = message_transport::send_chat_message_and_record_ack(
+                    args.peer,
+                    &local,
+                    &peer,
+                    OutgoingChatMessage {
+                        conversation_uuid,
+                        previous_hash: latest_hash,
+                        headers: b"Content-Type: text/plain".to_vec(),
+                        plaintext: line.as_bytes().to_vec(),
+                    },
+                    &storage,
+                )
+                .await?;
+                storage
+                    .insert_accepted_chat_message(AcceptedChatMessageInsert {
+                        conversation_uuid: message.conv_uuid,
+                        message_uuid: message.uuid,
+                        previous_hash: message.prev_hash,
+                        message_hash: ack.message_hash,
+                        sender: message.source,
+                        sent_at: i64::from(message.timestamp),
+                        headers: message.headers,
+                        encrypted_payload: message.data,
+                        decrypted_payload: line.into_bytes(),
+                        reply_to: None,
+                    })
+                    .map_err(CliError::PersistMessage)?;
+                latest_hash = ack.message_hash;
+                sent += 1;
+                writeln!(
+                    writer,
+                    "chat: delivered message_uuid={} acked_by={}",
+                    uuid_hex(&ack.message_uuid),
+                    fingerprint_hex(&ack.acknowledger)
+                )?;
+            }
+            received = service.recv() => {
+                let Some(received) = received else {
+                    break;
+                };
+                storage
+                    .insert_accepted_chat_message(AcceptedChatMessageInsert {
+                        conversation_uuid: received.conversation_uuid,
+                        message_uuid: received.uuid,
+                        previous_hash: received.previous_hash,
+                        message_hash: received.message_hash,
+                        sender: received.source,
+                        sent_at: i64::from(received.timestamp),
+                        headers: received.headers,
+                        encrypted_payload: received.encrypted_payload,
+                        decrypted_payload: received.plaintext,
+                        reply_to: None,
+                    })
+                    .map_err(CliError::PersistMessage)?;
+                latest_hash = received.message_hash;
+                received_count += 1;
+                writeln!(
+                    writer,
+                    "chat: received message_uuid={} message_hash={}",
+                    uuid_hex(&received.uuid),
+                    fingerprint_hex(&received.message_hash)
+                )?;
+            }
+        }
+    }
+
+    history = chat_history(&storage, conversation_uuid)?;
+    writeln!(
+        writer,
+        "chat: stopped sent={} received={} messages={}",
+        sent,
+        received_count,
+        history.len()
+    )?;
+    Ok(())
+}
+
 fn run_conversations<W: Write>(config_path: PathBuf, writer: &mut W) -> Result<(), CliError> {
     let storage = open_storage(config_path)?;
     let engine = ConversationEngine::new(&storage);
@@ -900,6 +1090,30 @@ fn find_contact(storage: &Storage, query: &str) -> Result<ContactRecord, CliErro
         .ok_or_else(|| CliError::MissingContact {
             query: query.to_owned(),
         })
+}
+
+fn require_trusted_contact(contact: &ContactRecord) -> Result<(), CliError> {
+    if contact.trust_state != ContactTrustState::Trusted {
+        return Err(CliError::ContactNotTrusted {
+            alias: contact.alias.clone(),
+        });
+    }
+    if !contact.public_key_present {
+        return Err(CliError::ContactMissingPublicKey {
+            alias: contact.alias.clone(),
+        });
+    }
+    Ok(())
+}
+
+fn chat_history(
+    storage: &Storage,
+    conversation_uuid: [u8; 16],
+) -> Result<Vec<ConversationMessage>, CliError> {
+    let engine = ConversationEngine::new(storage);
+    engine
+        .message_history(conversation_uuid)
+        .map_err(|error| conversation_error(error, conversation_uuid))
 }
 
 fn write_contact_header<W: Write>(writer: &mut W) -> Result<(), io::Error> {
@@ -1124,12 +1338,19 @@ fn load_peer_identity(
     fingerprint: &str,
 ) -> Result<PeerChatIdentity, CliError> {
     let parsed = parse_fingerprint(fingerprint)?;
+    load_peer_identity_from_fingerprint(storage, parsed)
+}
+
+fn load_peer_identity_from_fingerprint(
+    storage: &Storage,
+    fingerprint: Fingerprint,
+) -> Result<PeerChatIdentity, CliError> {
     let Some(record) = storage
-        .get_peer_key(parsed)
+        .get_peer_key(fingerprint)
         .map_err(CliError::PersistMessage)?
     else {
         return Err(CliError::MissingPeerKey {
-            fingerprint: fingerprint.to_owned(),
+            fingerprint: fingerprint_hex(&fingerprint),
         });
     };
     let public_key =
@@ -1293,6 +1514,7 @@ mod tests {
         assert!(help.contains("discover"));
         assert!(help.contains("receive"));
         assert!(help.contains("send"));
+        assert!(help.contains("chat"));
         assert!(help.contains("conversations"));
         assert!(help.contains("history"));
         assert!(help.contains("contact"));
@@ -1341,6 +1563,40 @@ mod tests {
                 previous_hash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
                     .to_owned(),
                 message: "hello bob".to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn parses_chat_subcommand_with_bounded_options() {
+        let cli = Cli::parse_from([
+            "decentra-chat",
+            "--config",
+            "config.toml",
+            "chat",
+            "--secret-key",
+            "alice.secret",
+            "--contact",
+            "bob",
+            "--peer",
+            "127.0.0.1:52001",
+            "--listen",
+            "127.0.0.1:52002",
+            "--conversation",
+            "11111111-1111-4111-8111-111111111111",
+            "--duration-ms",
+            "250",
+        ]);
+
+        assert_eq!(
+            cli.command(),
+            CliCommand::Chat(ChatArgs {
+                secret_key: PathBuf::from("alice.secret"),
+                contact: "bob".to_owned(),
+                peer: "127.0.0.1:52001".parse().expect("socket addr"),
+                listen: "127.0.0.1:52002".parse().expect("socket addr"),
+                conversation: "11111111-1111-4111-8111-111111111111".to_owned(),
+                duration_ms: 250,
             })
         );
     }
