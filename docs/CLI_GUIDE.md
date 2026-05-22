@@ -201,6 +201,30 @@ cargo run -- --config ./bob.toml key-request --peer 127.0.0.1:52002
 When it is missing, the CLI exits with an error that points back to
 `key-request`.
 
+## Onboarding a Discovered Peer
+
+`onboard` is the shortest path from a discovery row to a trusted local contact.
+Pass the advertised peer address, advertised fingerprint, and the alias you want
+to use locally. The command runs the same TCP key-exchange protocol as
+`key-request`, verifies that the fetched public key matches the advertised
+fingerprint, stores the peer key, and creates or updates the contact record.
+
+```sh
+cargo run -- --config ./alice.toml onboard \
+  --alias bob \
+  --fingerprint "$BOB_FINGERPRINT" \
+  --peer 127.0.0.1:52002 \
+  --trust
+```
+
+`--trust` is the explicit non-interactive trust decision. Omit it to fetch and
+store the key as an untrusted contact, then run `contact trust bob` after
+verifying the fingerprint out of band.
+
+If an alias already belongs to a different fingerprint, onboarding fails before
+requesting a new key. This prevents a discovered fingerprint change from
+silently replacing an existing pin.
+
 ## Contact Book and Trust
 
 Contacts are local aliases pinned to peer fingerprints in the configured SQLite

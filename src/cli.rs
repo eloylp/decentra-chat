@@ -60,6 +60,8 @@ pub enum CliCommand {
     KeyRequest(KeyRequestArgs),
     /// Run bounded UDP multicast discovery and print the visible peer list.
     Discover(DiscoverArgs),
+    /// Request a discovered peer key and store it as a local contact.
+    Onboard(OnboardArgs),
     /// Receive and persist one encrypted signed message from a known peer.
     Receive(ReceiveArgs),
     /// Send one encrypted signed message to a known peer and persist its ACK.
@@ -126,6 +128,22 @@ pub struct DiscoverArgs {
     /// Announcement interval in milliseconds.
     #[arg(long, default_value_t = 1_000)]
     announce_interval_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, clap::Args)]
+pub struct OnboardArgs {
+    /// Stable local alias for this peer.
+    #[arg(long, value_name = "ALIAS")]
+    alias: String,
+    /// Hex-encoded 32-byte fingerprint advertised by discovery.
+    #[arg(long, value_name = "HEX")]
+    fingerprint: String,
+    /// TCP peer address serving the key-exchange protocol.
+    #[arg(long, value_name = "ADDR")]
+    peer: SocketAddr,
+    /// Explicitly trust/pin the fetched key for this alias.
+    #[arg(long)]
+    trust: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, clap::Args)]
@@ -246,6 +264,22 @@ pub enum CliError {
         "contact `{query}` is not in local storage; run `contact add --alias <ALIAS> --fingerprint <HEX>` first"
     )]
     MissingContact { query: String },
+    #[error(
+        "contact alias `{alias}` is already pinned to fingerprint {existing_fingerprint}; refusing to replace it with {new_fingerprint}"
+    )]
+    ContactFingerprintChanged {
+        alias: String,
+        existing_fingerprint: String,
+        new_fingerprint: String,
+    },
+    #[error(
+        "peer at {peer} returned fingerprint {actual_fingerprint}, but discovery advertised {expected_fingerprint}; verify the peer before trusting it"
+    )]
+    OnboardFingerprintMismatch {
+        peer: SocketAddr,
+        expected_fingerprint: String,
+        actual_fingerprint: String,
+    },
     #[error("failed to persist contact: {0}")]
     PersistContact(#[source] StorageError),
     #[error("failed to read contacts: {0}")]
@@ -361,6 +395,10 @@ pub fn run<W: Write>(cli: Cli, mut writer: W) -> Result<(), CliError> {
         CliCommand::Discover(args) => {
             let runtime = runtime()?;
             runtime.block_on(run_discovery(cli.config_path(), args, &mut writer))?;
+        }
+        CliCommand::Onboard(args) => {
+            let runtime = runtime()?;
+            runtime.block_on(run_onboard(cli.config_path(), args, &mut writer))?;
         }
         CliCommand::Receive(args) => {
             let runtime = runtime()?;
@@ -526,6 +564,73 @@ pub async fn run_discovery<W: Write>(
     }
 
     write_peer_list(writer, &discovery.registry_snapshot(), Instant::now())?;
+    Ok(())
+}
+
+async fn run_onboard<W: Write>(
+    config_path: PathBuf,
+    args: OnboardArgs,
+    writer: &mut W,
+) -> Result<(), CliError> {
+    let alias = validate_cli_contact_alias(args.alias)?;
+    let expected_fingerprint = parse_fingerprint(&args.fingerprint)?;
+    let storage = open_storage(config_path)?;
+
+    if let Some(existing) = storage
+        .get_contact_by_alias(&alias)
+        .map_err(CliError::ReadContacts)?
+    {
+        if existing.fingerprint != expected_fingerprint {
+            return Err(CliError::ContactFingerprintChanged {
+                alias,
+                existing_fingerprint: fingerprint_hex(&existing.fingerprint),
+                new_fingerprint: fingerprint_hex(&expected_fingerprint),
+            });
+        }
+    }
+
+    let peer = key_exchange::request_peer_key(args.peer, &storage).await?;
+    if peer.fingerprint != expected_fingerprint {
+        return Err(CliError::OnboardFingerprintMismatch {
+            peer: args.peer,
+            expected_fingerprint: fingerprint_hex(&expected_fingerprint),
+            actual_fingerprint: fingerprint_hex(&peer.fingerprint),
+        });
+    }
+
+    let mut contact = storage
+        .upsert_contact(ContactUpsert {
+            alias,
+            fingerprint: expected_fingerprint,
+        })
+        .map_err(CliError::PersistContact)?;
+    if args.trust {
+        contact = storage
+            .trust_contact(expected_fingerprint)
+            .map_err(CliError::PersistContact)?
+            .ok_or_else(|| CliError::MissingContact {
+                query: fingerprint_hex(&expected_fingerprint),
+            })?;
+    }
+
+    writeln!(
+        writer,
+        "onboard: stored alias={} fingerprint={} peer={}",
+        contact.alias,
+        fingerprint_hex(&contact.fingerprint),
+        args.peer
+    )?;
+    if args.trust {
+        writeln!(writer, "onboard: trusted=true")?;
+    } else {
+        writeln!(
+            writer,
+            "onboard: trusted=false; run `contact trust {}` after verifying the fingerprint",
+            contact.alias
+        )?;
+    }
+    write_contact_header(writer)?;
+    write_contact(writer, &contact)?;
     Ok(())
 }
 

@@ -152,6 +152,141 @@ fn contact_book_add_list_show_and_trust_work_through_public_cli() {
 }
 
 #[test]
+fn onboard_fetches_peer_key_stores_contact_and_trusts_when_explicit() {
+    let fixture = TestFixture::new("onboard-success");
+    let storage_path = fixture.path("state/onboard.sqlite3");
+    let config_path = fixture.write_config("onboard.toml", 45103, &storage_path);
+    let bob_public = fixture.path("bob.public");
+    let bob_secret = fixture.path("bob.secret");
+
+    let bob_keygen = fixture.cli(
+        [
+            "keygen",
+            "--secret-key",
+            path_arg(&bob_secret),
+            "--public-key",
+            path_arg(&bob_public),
+        ],
+        "bob keygen for onboarding",
+    );
+    assert_success(&bob_keygen, "bob keygen for onboarding");
+    let bob_fingerprint = fingerprint_from_keygen(&stdout(&bob_keygen));
+
+    let key_addr = format!("127.0.0.1:{}", free_tcp_port());
+    let mut bob_key_server = fixture.spawn_cli(
+        [
+            "key-serve",
+            "--public-key",
+            path_arg(&bob_public),
+            "--listen",
+            key_addr.as_str(),
+            "--duration-ms",
+            "10000",
+        ],
+        "bob key-serve for onboarding",
+    );
+
+    let onboard = fixture.eventually_cli(
+        [
+            "--config",
+            path_arg(&config_path),
+            "onboard",
+            "--alias",
+            "bob",
+            "--fingerprint",
+            bob_fingerprint.as_str(),
+            "--peer",
+            key_addr.as_str(),
+            "--trust",
+        ],
+        "onboard bob",
+    );
+    assert_success(&onboard, "onboard bob");
+    bob_key_server.kill_and_wait();
+
+    let onboard_stdout = stdout(&onboard);
+    assert!(
+        onboard_stdout.contains("onboard: stored alias=bob"),
+        "{onboard_stdout}"
+    );
+    assert!(
+        onboard_stdout.contains("onboard: trusted=true"),
+        "{onboard_stdout}"
+    );
+    assert!(
+        onboard_stdout.contains(&format!("bob\t{bob_fingerprint}\ttrue\ttrusted")),
+        "{onboard_stdout}"
+    );
+
+    let show = fixture.cli(
+        ["--config", path_arg(&config_path), "contact", "show", "bob"],
+        "show onboarded bob",
+    );
+    assert_success(&show, "show onboarded bob");
+    let show_stdout = stdout(&show);
+    assert!(
+        show_stdout.contains(&format!("bob\t{bob_fingerprint}\ttrue\ttrusted")),
+        "{show_stdout}"
+    );
+}
+
+#[test]
+fn onboard_refuses_alias_fingerprint_changes_before_rekeying() {
+    let fixture = TestFixture::new("onboard-fingerprint-change");
+    let storage_path = fixture.path("state/onboard.sqlite3");
+    let config_path = fixture.write_config("onboard.toml", 45104, &storage_path);
+    let old_fingerprint = "1111111111111111111111111111111111111111111111111111111111111111";
+    let new_fingerprint = "2222222222222222222222222222222222222222222222222222222222222222";
+
+    let add = fixture.cli(
+        [
+            "--config",
+            path_arg(&config_path),
+            "contact",
+            "add",
+            "--alias",
+            "bob",
+            "--fingerprint",
+            old_fingerprint,
+        ],
+        "seed bob contact",
+    );
+    assert_success(&add, "seed bob contact");
+
+    let failure = fixture.cli(
+        [
+            "--config",
+            path_arg(&config_path),
+            "onboard",
+            "--alias",
+            "bob",
+            "--fingerprint",
+            new_fingerprint,
+            "--peer",
+            "127.0.0.1:9",
+            "--trust",
+        ],
+        "onboard bob changed fingerprint",
+    );
+
+    assert!(
+        !failure.status.success(),
+        "onboard should fail on fingerprint change\nstdout:\n{}\nstderr:\n{}",
+        stdout(&failure),
+        stderr(&failure)
+    );
+    let stderr = stderr(&failure);
+    assert!(
+        stderr.contains("refusing to replace it"),
+        "stderr should explain fingerprint-change refusal: {stderr}"
+    );
+    assert!(
+        stderr.contains(old_fingerprint) && stderr.contains(new_fingerprint),
+        "stderr should include both fingerprints: {stderr}"
+    );
+}
+
+#[test]
 fn key_exchange_send_ack_and_history_work_through_public_cli() {
     let fixture = TestFixture::new("chat-roundtrip");
     let alice_storage = fixture.path("alice.sqlite3");
