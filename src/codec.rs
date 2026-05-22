@@ -84,6 +84,19 @@ pub enum Message {
     MessageAck(MessageAck),
 }
 
+impl Message {
+    /// Returns the stable user-facing name for this protocol message variant.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::DiscoveryAnnounce(_) => "discovery announce",
+            Self::KeyExchangeReq(_) => "key-exchange request",
+            Self::KeyExchangeResp(_) => "key-exchange response",
+            Self::ChatMessage(_) => "chat message",
+            Self::MessageAck(_) => "message ack",
+        }
+    }
+}
+
 impl TryFrom<&[u8]> for DiscoveryAnnounce {
     type Error = CodecError;
 
@@ -374,6 +387,63 @@ mod tests {
 
     fn bytes_32(seed: u8) -> [u8; 32] {
         [seed; 32]
+    }
+
+    #[test]
+    fn message_names_are_stable() {
+        let cases = [
+            (
+                Message::DiscoveryAnnounce(DiscoveryAnnounce {
+                    version: 0,
+                    address: [0; 4],
+                    port: 0,
+                    nick: Vec::new(),
+                    key_fingerprint: [0; 32],
+                }),
+                "discovery announce",
+            ),
+            (
+                Message::KeyExchangeReq(KeyExchangeReq { version: 0 }),
+                "key-exchange request",
+            ),
+            (
+                Message::KeyExchangeResp(KeyExchangeResp {
+                    version: 0,
+                    key_data: Vec::new(),
+                }),
+                "key-exchange response",
+            ),
+            (
+                Message::ChatMessage(ChatMessage {
+                    version: 0,
+                    uuid: [0; 16],
+                    conv_uuid: [0; 16],
+                    conv_type: 0,
+                    prev_hash: [0; 32],
+                    timestamp: 0,
+                    source: [0; 32],
+                    destination: [0; 32],
+                    headers: Vec::new(),
+                    data: Vec::new(),
+                    signature: Vec::new(),
+                }),
+                "chat message",
+            ),
+            (
+                Message::MessageAck(MessageAck {
+                    version: 0,
+                    uuid: [0; 16],
+                    message_hash: [0; 32],
+                    acknowledger: [0; 32],
+                    signature: Vec::new(),
+                }),
+                "message ack",
+            ),
+        ];
+
+        for (message, expected_name) in cases {
+            assert_eq!(message.name(), expected_name);
+        }
     }
 
     #[test]
