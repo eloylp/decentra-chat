@@ -1,9 +1,9 @@
 # CLI User Guide
 
 The DecentraChat CLI is the current user-facing client. It can inspect local
-configuration, initialize storage, run bounded LAN discovery, exchange public
-keys, send and receive one encrypted message, and read conversation history from
-SQLite.
+configuration, initialize storage, manage local contacts, run bounded LAN
+discovery, exchange public keys, send and receive one encrypted message, and
+read conversation history from SQLite.
 
 The commands below describe what is implemented in `src/cli.rs` today. There is
 no TUI or long-running chat daemon yet.
@@ -200,6 +200,51 @@ cargo run -- --config ./bob.toml key-request --peer 127.0.0.1:52002
 `send` and `receive` require the peer fingerprint to exist in local storage.
 When it is missing, the CLI exits with an error that points back to
 `key-request`.
+
+## Contact Book and Trust
+
+Contacts are local aliases pinned to peer fingerprints in the configured SQLite
+store. They do not replace raw fingerprint workflows yet; `key-request`, `send`,
+`receive`, `conversations`, and `history` still accept the same fingerprint
+arguments as before.
+
+Add or update an alias for a fingerprint:
+
+```sh
+cargo run -- --config ./alice.toml contact add \
+  --alias bob \
+  --fingerprint "$BOB_FINGERPRINT"
+```
+
+List contacts:
+
+```sh
+cargo run -- --config ./alice.toml contact list
+```
+
+Show one contact by alias or fingerprint:
+
+```sh
+cargo run -- --config ./alice.toml contact show bob
+cargo run -- --config ./alice.toml contact show "$BOB_FINGERPRINT"
+```
+
+Mark a contact as explicitly trusted/pinned after verifying the fingerprint:
+
+```sh
+cargo run -- --config ./alice.toml contact trust bob
+```
+
+Contact output is tab-separated:
+
+```text
+alias	fingerprint	public_key_present	trust_state	created_at	updated_at
+```
+
+Aliases are case-insensitive for lookup and uniqueness. The CLI rejects empty
+aliases, aliases with leading or trailing spaces, control characters, tabs, or
+newlines, and aliases longer than 64 bytes. Reusing an alias for a different
+fingerprint fails with an actionable conflict error.
 
 ## Sending and Receiving
 
