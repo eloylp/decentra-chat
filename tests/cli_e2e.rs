@@ -71,6 +71,87 @@ fn discover_runs_with_bounded_loopback_runtime_and_exits_cleanly() {
 }
 
 #[test]
+fn contact_book_add_list_show_and_trust_work_through_public_cli() {
+    let fixture = TestFixture::new("contact-book");
+    let storage_path = fixture.path("state/contacts.sqlite3");
+    let config_path = fixture.write_config("contacts.toml", 45102, &storage_path);
+    let fingerprint = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    let add = fixture.cli(
+        [
+            "--config",
+            path_arg(&config_path),
+            "contact",
+            "add",
+            "--alias",
+            "alice",
+            "--fingerprint",
+            fingerprint,
+        ],
+        "contact add alice",
+    );
+    assert_success(&add, "contact add alice");
+    let add_stdout = stdout(&add);
+    assert!(add_stdout.contains("contact: stored alias=alice"), "{add_stdout}");
+    assert!(
+        add_stdout.contains(&format!("alice\t{fingerprint}\tfalse\tuntrusted")),
+        "{add_stdout}"
+    );
+
+    let trust = fixture.cli(
+        [
+            "--config",
+            path_arg(&config_path),
+            "contact",
+            "trust",
+            "alice",
+        ],
+        "contact trust alice",
+    );
+    assert_success(&trust, "contact trust alice");
+    let trust_stdout = stdout(&trust);
+    assert!(trust_stdout.contains("contact: trusted alias=alice"), "{trust_stdout}");
+    assert!(
+        trust_stdout.contains(&format!("alice\t{fingerprint}\tfalse\ttrusted")),
+        "{trust_stdout}"
+    );
+
+    let list = fixture.cli(
+        ["--config", path_arg(&config_path), "contact", "list"],
+        "contact list",
+    );
+    assert_success(&list, "contact list");
+    let list_stdout = stdout(&list);
+    assert!(list_stdout.contains("contacts: 1"), "{list_stdout}");
+    assert!(
+        list_stdout.contains("alias\tfingerprint\tpublic_key_present\ttrust_state"),
+        "{list_stdout}"
+    );
+    assert!(
+        list_stdout.contains(&format!("alice\t{fingerprint}\tfalse\ttrusted")),
+        "{list_stdout}"
+    );
+
+    let show = fixture.cli(
+        [
+            "--config",
+            path_arg(&config_path),
+            "contact",
+            "show",
+            fingerprint,
+        ],
+        "contact show alice by fingerprint",
+    );
+    assert_success(&show, "contact show alice by fingerprint");
+    let show_stdout = stdout(&show);
+    assert!(show_stdout.contains("contact: alias=alice"), "{show_stdout}");
+    assert!(
+        show_stdout.contains(&format!("alice\t{fingerprint}\tfalse\ttrusted")),
+        "{show_stdout}"
+    );
+}
+
+#[test]
 fn key_exchange_send_ack_and_history_work_through_public_cli() {
     let fixture = TestFixture::new("chat-roundtrip");
     let alice_storage = fixture.path("alice.sqlite3");

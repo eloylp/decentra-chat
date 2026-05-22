@@ -12,6 +12,7 @@ const MIGRATION_001: &str = "001_peer_keys";
 const MIGRATION_002: &str = "002_message_acks";
 const MIGRATION_003: &str = "003_conversation_messages";
 const MIGRATION_004: &str = "004_reply_metadata";
+const MIGRATION_005: &str = "005_contacts";
 
 /// SQLite-backed local storage for DecentraChat peer data.
 pub struct Storage {
@@ -36,6 +37,43 @@ pub struct PeerKeyUpsert {
     pub nick: Option<String>,
     pub public_key: Vec<u8>,
     pub last_seen: i64,
+}
+
+/// Local trust state for a pinned contact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContactTrustState {
+    Untrusted,
+    Trusted,
+}
+
+impl ContactTrustState {
+    fn from_str(value: &str) -> Result<Self, StorageError> {
+        match value {
+            "untrusted" => Ok(Self::Untrusted),
+            "trusted" => Ok(Self::Trusted),
+            value => Err(StorageError::InvalidContactTrustState {
+                value: value.to_owned(),
+            }),
+        }
+    }
+}
+
+/// SQLite-backed contact and fingerprint-pinning record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContactRecord {
+    pub alias: String,
+    pub fingerprint: Fingerprint,
+    pub public_key_present: bool,
+    pub trust_state: ContactTrustState,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+/// Data accepted by the contact repository upsert operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContactUpsert {
+    pub alias: String,
+    pub fingerprint: Fingerprint,
 }
 
 /// Persisted delivery acknowledgement for one outbound chat message.
@@ -125,6 +163,19 @@ pub enum StorageError {
     Repository(#[source] rusqlite::Error),
     #[error("peer public key must not be empty")]
     EmptyPublicKey,
+    #[error("contact alias must not be empty")]
+    EmptyContactAlias,
+    #[error(
+        "contact alias `{alias}` is invalid: use 1-64 visible characters without tabs, newlines, or leading/trailing spaces"
+    )]
+    InvalidContactAlias { alias: String },
+    #[error("contact alias `{alias}` already belongs to fingerprint {existing_fingerprint}")]
+    ContactAliasConflict {
+        alias: String,
+        existing_fingerprint: String,
+    },
+    #[error("stored contact trust state `{value}` is unsupported")]
+    InvalidContactTrustState { value: String },
     #[error("message ACK signature must not be empty")]
     EmptyAckSignature,
     #[error("stored message UUID must be 16 bytes, got {len}")]
@@ -197,6 +248,15 @@ impl Storage {
                 ],
             )
             .map_err(StorageError::Repository)?;
+        self.connection
+            .execute(
+                "UPDATE contacts
+                 SET public_key_present = 1,
+                     updated_at = MAX(updated_at, ?2)
+                 WHERE fingerprint = ?1",
+                params![&upsert.fingerprint[..], now],
+            )
+            .map_err(StorageError::Repository)?;
 
         self.get_peer_key(upsert.fingerprint)?
             .ok_or_else(|| StorageError::Repository(rusqlite::Error::QueryReturnedNoRows))
@@ -219,6 +279,134 @@ impl Storage {
             .map_err(StorageError::Repository)?
             .map(validate_record)
             .transpose()
+    }
+
+    /// Insert or update a contact alias for a fingerprint.
+    pub fn upsert_contact(
+        &self,
+        upsert: ContactUpsert,
+    ) -> Result<ContactRecord, StorageError> {
+        let alias = validate_contact_alias(upsert.alias)?;
+        if let Some(existing) = self.get_contact_by_alias(&alias)? {
+            if existing.fingerprint != upsert.fingerprint {
+                return Err(StorageError::ContactAliasConflict {
+                    alias,
+                    existing_fingerprint: fingerprint_hex(&existing.fingerprint),
+                });
+            }
+        }
+
+        let now = unix_timestamp()?;
+        let public_key_present = self.peer_key_exists(upsert.fingerprint)?;
+        self.connection
+            .execute(
+                "INSERT INTO contacts (
+                    fingerprint, alias, public_key_present, trust_state, created_at, updated_at
+                ) VALUES (?1, ?2, ?3, 'untrusted', ?4, ?4)
+                ON CONFLICT(fingerprint) DO UPDATE SET
+                    alias = excluded.alias,
+                    public_key_present = excluded.public_key_present,
+                    updated_at = excluded.updated_at",
+                params![
+                    &upsert.fingerprint[..],
+                    alias,
+                    public_key_present,
+                    now,
+                ],
+            )
+            .map_err(StorageError::Repository)?;
+
+        self.get_contact_by_fingerprint(upsert.fingerprint)?
+            .ok_or_else(|| StorageError::Repository(rusqlite::Error::QueryReturnedNoRows))
+    }
+
+    /// Mark a contact as explicitly trusted/pinned.
+    pub fn trust_contact(
+        &self,
+        fingerprint: Fingerprint,
+    ) -> Result<Option<ContactRecord>, StorageError> {
+        let now = unix_timestamp()?;
+        self.connection
+            .execute(
+                "UPDATE contacts
+                 SET trust_state = 'trusted',
+                     public_key_present = EXISTS(
+                        SELECT 1 FROM peer_keys WHERE peer_keys.fingerprint = contacts.fingerprint
+                     ),
+                     updated_at = ?2
+                 WHERE fingerprint = ?1",
+                params![&fingerprint[..], now],
+            )
+            .map_err(StorageError::Repository)?;
+        self.get_contact_by_fingerprint(fingerprint)
+    }
+
+    /// Fetch a contact by fingerprint.
+    pub fn get_contact_by_fingerprint(
+        &self,
+        fingerprint: Fingerprint,
+    ) -> Result<Option<ContactRecord>, StorageError> {
+        self.connection
+            .query_row(
+                "SELECT alias, fingerprint, public_key_present, trust_state, created_at, updated_at
+                 FROM contacts
+                 WHERE fingerprint = ?1",
+                params![&fingerprint[..]],
+                row_to_contact,
+            )
+            .optional()
+            .map_err(StorageError::Repository)?
+            .map(validate_contact_record)
+            .transpose()
+    }
+
+    /// Fetch a contact by alias.
+    pub fn get_contact_by_alias(
+        &self,
+        alias: &str,
+    ) -> Result<Option<ContactRecord>, StorageError> {
+        let alias = validate_contact_alias(alias.to_owned())?;
+        self.connection
+            .query_row(
+                "SELECT alias, fingerprint, public_key_present, trust_state, created_at, updated_at
+                 FROM contacts
+                 WHERE alias = ?1 COLLATE NOCASE",
+                params![alias],
+                row_to_contact,
+            )
+            .optional()
+            .map_err(StorageError::Repository)?
+            .map(validate_contact_record)
+            .transpose()
+    }
+
+    /// List contacts in deterministic alias order.
+    pub fn list_contacts(&self) -> Result<Vec<ContactRecord>, StorageError> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT alias, fingerprint, public_key_present, trust_state, created_at, updated_at
+                 FROM contacts
+                 ORDER BY alias COLLATE NOCASE, fingerprint",
+            )
+            .map_err(StorageError::Repository)?;
+
+        let contacts = statement
+            .query_map([], row_to_contact)
+            .map_err(StorageError::Repository)?
+            .map(|row| row.map_err(StorageError::Repository).and_then(validate_contact_record))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(contacts)
+    }
+
+    fn peer_key_exists(&self, fingerprint: Fingerprint) -> Result<bool, StorageError> {
+        self.connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM peer_keys WHERE fingerprint = ?1)",
+                params![&fingerprint[..]],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(StorageError::Repository)
     }
 
     /// Insert or update the signed ACK state for an outbound message UUID.
@@ -566,7 +754,25 @@ fn apply_migrations(connection: &mut Connection) -> Result<(), StorageError> {
                 ON accepted_chat_messages(conversation_uuid);
 
             CREATE INDEX IF NOT EXISTS idx_accepted_chat_messages_previous_hash
-                ON accepted_chat_messages(conversation_uuid, previous_hash);",
+                ON accepted_chat_messages(conversation_uuid, previous_hash);
+
+            CREATE TABLE IF NOT EXISTS contacts (
+                fingerprint BLOB PRIMARY KEY CHECK(length(fingerprint) = 32),
+                alias TEXT NOT NULL COLLATE NOCASE UNIQUE CHECK(length(alias) BETWEEN 1 AND 64),
+                public_key_present INTEGER NOT NULL DEFAULT 0 CHECK(public_key_present IN (0, 1)),
+                trust_state TEXT NOT NULL DEFAULT 'untrusted'
+                    CHECK(trust_state IN ('untrusted', 'trusted')),
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_contacts_alias
+                ON contacts(alias COLLATE NOCASE);
+
+            UPDATE contacts
+            SET public_key_present = EXISTS(
+                SELECT 1 FROM peer_keys WHERE peer_keys.fingerprint = contacts.fingerprint
+            );",
         )
         .map_err(StorageError::Migration)?;
 
@@ -588,7 +794,13 @@ fn apply_migrations(connection: &mut Connection) -> Result<(), StorageError> {
     }
 
     let now = unix_timestamp()?;
-    for migration in [MIGRATION_001, MIGRATION_002, MIGRATION_003, MIGRATION_004] {
+    for migration in [
+        MIGRATION_001,
+        MIGRATION_002,
+        MIGRATION_003,
+        MIGRATION_004,
+        MIGRATION_005,
+    ] {
         transaction
             .execute(
                 "INSERT OR IGNORE INTO schema_migrations (name, applied_at) VALUES (?1, ?2)",
@@ -616,6 +828,20 @@ fn column_exists(
     Ok(columns.iter().any(|name| name == column))
 }
 
+fn row_to_contact(row: &rusqlite::Row<'_>) -> rusqlite::Result<ContactRecord> {
+    let trust_state = row
+        .get::<_, String>(3)
+        .and_then(|value| ContactTrustState::from_str(&value).map_err(storage_error_to_sql_error))?;
+    Ok(ContactRecord {
+        alias: row.get(0)?,
+        fingerprint: vec_to_fingerprint(row.get(1)?).map_err(storage_error_to_sql_error)?,
+        public_key_present: row.get(2)?,
+        trust_state,
+        created_at: row.get(4)?,
+        updated_at: row.get(5)?,
+    })
+}
+
 fn row_to_peer_key(row: &rusqlite::Row<'_>) -> rusqlite::Result<PeerKeyRecord> {
     Ok(PeerKeyRecord {
         fingerprint: vec_to_fingerprint(row.get(0)?).map_err(|error| {
@@ -631,6 +857,26 @@ fn row_to_peer_key(row: &rusqlite::Row<'_>) -> rusqlite::Result<PeerKeyRecord> {
         last_seen: row.get(4)?,
         updated_at: row.get(5)?,
     })
+}
+
+fn validate_contact_record(record: ContactRecord) -> Result<ContactRecord, StorageError> {
+    validate_contact_alias(record.alias.clone())?;
+    Ok(record)
+}
+
+fn validate_contact_alias(alias: String) -> Result<String, StorageError> {
+    if alias.is_empty() {
+        return Err(StorageError::EmptyContactAlias);
+    }
+    if alias.trim() != alias
+        || alias.len() > 64
+        || alias
+            .chars()
+            .any(|character| character.is_control() || character == '\t')
+    {
+        return Err(StorageError::InvalidContactAlias { alias });
+    }
+    Ok(alias)
 }
 
 fn row_to_message_ack(row: &rusqlite::Row<'_>) -> rusqlite::Result<MessageAckRecord> {
@@ -895,6 +1141,23 @@ fn unix_timestamp() -> Result<i64, StorageError> {
     i64::try_from(duration.as_secs()).map_err(|_| StorageError::InvalidSystemTime)
 }
 
+fn fingerprint_hex(fingerprint: &Fingerprint) -> String {
+    let mut output = String::with_capacity(64);
+    for byte in fingerprint {
+        output.push(nibble_hex(byte >> 4));
+        output.push(nibble_hex(byte & 0x0f));
+    }
+    output
+}
+
+fn nibble_hex(value: u8) -> char {
+    match value {
+        0..=9 => (b'0' + value) as char,
+        10..=15 => (b'a' + value - 10) as char,
+        _ => unreachable!("nibble value is always <= 15"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -939,12 +1202,18 @@ mod tests {
             .connection
             .query_row(
                 "SELECT COUNT(*) FROM schema_migrations
-                 WHERE name IN (?1, ?2, ?3, ?4)",
-                params![MIGRATION_001, MIGRATION_002, MIGRATION_003, MIGRATION_004],
+                 WHERE name IN (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    MIGRATION_001,
+                    MIGRATION_002,
+                    MIGRATION_003,
+                    MIGRATION_004,
+                    MIGRATION_005
+                ],
                 |row| row.get(0),
             )
             .expect("query migration count");
-        assert_eq!(migration_count, 4);
+        assert_eq!(migration_count, 5);
         assert!(db_path.exists());
     }
 
@@ -960,7 +1229,7 @@ mod tests {
             .connection
             .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| row.get(0))
             .expect("query migration count");
-        assert_eq!(migration_count, 4);
+        assert_eq!(migration_count, 5);
     }
 
     #[test]
@@ -983,6 +1252,71 @@ mod tests {
         assert_eq!(fetched.public_key, vec![1, 2, 3, 4]);
         assert_eq!(fetched.first_seen, 100);
         assert_eq!(fetched.last_seen, 100);
+    }
+
+    #[test]
+    fn upsert_and_list_contacts_preserves_trust_and_tracks_public_key_presence() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = Storage::open(dir.path().join("dc.sqlite3")).expect("open storage");
+        let fingerprint = [0xaa; 32];
+
+        let contact = storage
+            .upsert_contact(ContactUpsert {
+                alias: "alice".to_owned(),
+                fingerprint,
+            })
+            .expect("insert contact");
+        assert_eq!(contact.trust_state, ContactTrustState::Untrusted);
+        assert!(!contact.public_key_present);
+
+        storage
+            .trust_contact(fingerprint)
+            .expect("trust contact")
+            .expect("stored contact");
+        storage
+            .upsert_peer_key(upsert(fingerprint, Some("alice"), 100))
+            .expect("insert peer key");
+        let updated = storage
+            .upsert_contact(ContactUpsert {
+                alias: "alice-renamed".to_owned(),
+                fingerprint,
+            })
+            .expect("update contact");
+
+        assert_eq!(updated.trust_state, ContactTrustState::Trusted);
+        assert!(updated.public_key_present);
+        assert_eq!(
+            storage.list_contacts().expect("list contacts"),
+            vec![updated]
+        );
+    }
+
+    #[test]
+    fn contact_alias_cannot_move_to_another_fingerprint() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = Storage::open(dir.path().join("dc.sqlite3")).expect("open storage");
+        storage
+            .upsert_contact(ContactUpsert {
+                alias: "alice".to_owned(),
+                fingerprint: [0xaa; 32],
+            })
+            .expect("insert contact");
+
+        let error = storage
+            .upsert_contact(ContactUpsert {
+                alias: "ALICE".to_owned(),
+                fingerprint: [0xbb; 32],
+            })
+            .expect_err("alias conflict");
+
+        assert!(error.to_string().contains("already belongs to fingerprint"));
+    }
+
+    #[test]
+    fn invalid_contact_alias_is_actionable() {
+        let error = validate_contact_alias(" alice ".to_owned()).expect_err("invalid alias");
+
+        assert!(error.to_string().contains("without tabs, newlines"));
     }
 
     #[test]
@@ -1100,7 +1434,7 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| row.get(0))
             .expect("query migration count");
 
-        assert_eq!(migration_count, 4);
+        assert_eq!(migration_count, 5);
         storage
             .upsert_message_ack(MessageAckUpsert {
                 message_uuid: [0x44; 16],
@@ -1117,6 +1451,12 @@ mod tests {
                 [0x12; 32],
             ))
             .expect("insert accepted message after migration");
+        storage
+            .upsert_contact(ContactUpsert {
+                alias: "alice".to_owned(),
+                fingerprint: [0x77; 32],
+            })
+            .expect("insert contact after migration");
     }
 
     #[test]

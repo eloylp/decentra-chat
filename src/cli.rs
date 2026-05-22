@@ -13,7 +13,10 @@ use crate::{
         self, ChatMessageService, ChatTransportError, LocalChatIdentity, OutgoingChatMessage,
         PeerChatIdentity,
     },
-    storage::{AcceptedChatMessageInsert, Storage, StorageError},
+    storage::{
+        AcceptedChatMessageInsert, ContactRecord, ContactTrustState, ContactUpsert, Storage,
+        StorageError,
+    },
 };
 use clap::{CommandFactory, Parser, Subcommand};
 use pgp::composed::SignedSecretKey;
@@ -65,6 +68,8 @@ pub enum CliCommand {
     Conversations,
     /// Show ordered message history for one conversation.
     History(HistoryArgs),
+    /// Manage local contact aliases and pinned trust state.
+    Contact(ContactArgs),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, clap::Args)]
@@ -179,6 +184,41 @@ pub struct HistoryArgs {
     conversation: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, clap::Args)]
+pub struct ContactArgs {
+    #[command(subcommand)]
+    command: ContactCommand,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+pub enum ContactCommand {
+    /// Add or update a local alias for a peer fingerprint.
+    Add(ContactAddArgs),
+    /// List local contacts.
+    List,
+    /// Show one contact by fingerprint or alias.
+    Show(ContactLookupArgs),
+    /// Mark one contact as explicitly trusted/pinned.
+    Trust(ContactLookupArgs),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, clap::Args)]
+pub struct ContactAddArgs {
+    /// Stable local alias for this peer.
+    #[arg(long, value_name = "ALIAS")]
+    alias: String,
+    /// Hex-encoded 32-byte peer fingerprint.
+    #[arg(long, value_name = "HEX")]
+    fingerprint: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, clap::Args)]
+pub struct ContactLookupArgs {
+    /// Hex-encoded 32-byte fingerprint or stored alias.
+    #[arg(value_name = "FINGERPRINT_OR_ALIAS")]
+    query: String,
+}
+
 #[derive(Debug, Error)]
 pub enum CliError {
     #[error("failed to load config from {path}: {source}")]
@@ -200,6 +240,16 @@ pub enum CliError {
     },
     #[error("invalid discovery fingerprint: {0}")]
     InvalidFingerprint(String),
+    #[error("invalid contact alias `{alias}`: use 1-64 visible characters without tabs, newlines, or leading/trailing spaces")]
+    InvalidContactAlias { alias: String },
+    #[error(
+        "contact `{query}` is not in local storage; run `contact add --alias <ALIAS> --fingerprint <HEX>` first"
+    )]
+    MissingContact { query: String },
+    #[error("failed to persist contact: {0}")]
+    PersistContact(#[source] StorageError),
+    #[error("failed to read contacts: {0}")]
+    ReadContacts(#[source] StorageError),
     #[error("discovery duration must be greater than zero")]
     InvalidDiscoveryDuration,
     #[error("discovery announcement interval must be greater than zero")]
@@ -322,6 +372,7 @@ pub fn run<W: Write>(cli: Cli, mut writer: W) -> Result<(), CliError> {
         }
         CliCommand::Conversations => run_conversations(cli.config_path(), &mut writer)?,
         CliCommand::History(args) => run_history(cli.config_path(), args, &mut writer)?,
+        CliCommand::Contact(args) => run_contact(cli.config_path(), args, &mut writer)?,
     }
     Ok(())
 }
@@ -636,6 +687,139 @@ fn run_history<W: Write>(
     Ok(())
 }
 
+fn run_contact<W: Write>(
+    config_path: PathBuf,
+    args: ContactArgs,
+    writer: &mut W,
+) -> Result<(), CliError> {
+    match args.command {
+        ContactCommand::Add(args) => run_contact_add(config_path, args, writer),
+        ContactCommand::List => run_contact_list(config_path, writer),
+        ContactCommand::Show(args) => run_contact_show(config_path, args, writer),
+        ContactCommand::Trust(args) => run_contact_trust(config_path, args, writer),
+    }
+}
+
+fn run_contact_add<W: Write>(
+    config_path: PathBuf,
+    args: ContactAddArgs,
+    writer: &mut W,
+) -> Result<(), CliError> {
+    let alias = validate_cli_contact_alias(args.alias)?;
+    let fingerprint = parse_fingerprint(&args.fingerprint)?;
+    let storage = open_storage(config_path)?;
+    let contact = storage
+        .upsert_contact(ContactUpsert { alias, fingerprint })
+        .map_err(CliError::PersistContact)?;
+
+    writeln!(
+        writer,
+        "contact: stored alias={} fingerprint={}",
+        contact.alias,
+        fingerprint_hex(&contact.fingerprint)
+    )?;
+    write_contact_header(writer)?;
+    write_contact(writer, &contact)?;
+    Ok(())
+}
+
+fn run_contact_list<W: Write>(config_path: PathBuf, writer: &mut W) -> Result<(), CliError> {
+    let storage = open_storage(config_path)?;
+    let contacts = storage.list_contacts().map_err(CliError::ReadContacts)?;
+
+    writeln!(writer, "contacts: {}", contacts.len())?;
+    write_contact_header(writer)?;
+    for contact in contacts {
+        write_contact(writer, &contact)?;
+    }
+    Ok(())
+}
+
+fn run_contact_show<W: Write>(
+    config_path: PathBuf,
+    args: ContactLookupArgs,
+    writer: &mut W,
+) -> Result<(), CliError> {
+    let storage = open_storage(config_path)?;
+    let contact = find_contact(&storage, &args.query)?;
+
+    writeln!(
+        writer,
+        "contact: alias={} fingerprint={}",
+        contact.alias,
+        fingerprint_hex(&contact.fingerprint)
+    )?;
+    write_contact_header(writer)?;
+    write_contact(writer, &contact)?;
+    Ok(())
+}
+
+fn run_contact_trust<W: Write>(
+    config_path: PathBuf,
+    args: ContactLookupArgs,
+    writer: &mut W,
+) -> Result<(), CliError> {
+    let storage = open_storage(config_path)?;
+    let contact = find_contact(&storage, &args.query)?;
+    let trusted = storage
+        .trust_contact(contact.fingerprint)
+        .map_err(CliError::PersistContact)?
+        .ok_or_else(|| CliError::MissingContact { query: args.query })?;
+
+    writeln!(
+        writer,
+        "contact: trusted alias={} fingerprint={}",
+        trusted.alias,
+        fingerprint_hex(&trusted.fingerprint)
+    )?;
+    write_contact_header(writer)?;
+    write_contact(writer, &trusted)?;
+    Ok(())
+}
+
+fn find_contact(storage: &Storage, query: &str) -> Result<ContactRecord, CliError> {
+    if query.len() == 64 && query.bytes().all(|byte| hex_value(byte).is_some()) {
+        let fingerprint = parse_fingerprint(query)?;
+        return storage
+            .get_contact_by_fingerprint(fingerprint)
+            .map_err(CliError::ReadContacts)?
+            .ok_or_else(|| CliError::MissingContact {
+                query: query.to_owned(),
+            });
+    }
+
+    validate_cli_contact_alias(query.to_owned())?;
+    storage
+        .get_contact_by_alias(query)
+        .map_err(CliError::ReadContacts)?
+        .ok_or_else(|| CliError::MissingContact {
+            query: query.to_owned(),
+        })
+}
+
+fn write_contact_header<W: Write>(writer: &mut W) -> Result<(), io::Error> {
+    writeln!(
+        writer,
+        "alias\tfingerprint\tpublic_key_present\ttrust_state\tcreated_at\tupdated_at"
+    )
+}
+
+fn write_contact<W: Write>(
+    writer: &mut W,
+    contact: &ContactRecord,
+) -> Result<(), io::Error> {
+    writeln!(
+        writer,
+        "{}\t{}\t{}\t{}\t{}\t{}",
+        contact.alias,
+        fingerprint_hex(&contact.fingerprint),
+        contact.public_key_present,
+        contact_trust_state_label(contact.trust_state),
+        contact.created_at,
+        contact.updated_at
+    )
+}
+
 fn conversation_error(
     error: ConversationEngineError,
     requested_uuid: [u8; 16],
@@ -648,6 +832,13 @@ fn conversation_error(
             conversation_uuid: uuid_hex(&requested_uuid),
         },
         error => CliError::ReadConversation(error),
+    }
+}
+
+fn contact_trust_state_label(state: ContactTrustState) -> &'static str {
+    match state {
+        ContactTrustState::Untrusted => "untrusted",
+        ContactTrustState::Trusted => "trusted",
     }
 }
 
@@ -747,6 +938,19 @@ fn parse_fingerprint(input: &str) -> Result<Fingerprint, CliError> {
         fingerprint[index] = (high << 4) | low;
     }
     Ok(fingerprint)
+}
+
+fn validate_cli_contact_alias(alias: String) -> Result<String, CliError> {
+    if alias.is_empty()
+        || alias.trim() != alias
+        || alias.len() > 64
+        || alias
+            .chars()
+            .any(|character| character.is_control() || character == '\t')
+    {
+        return Err(CliError::InvalidContactAlias { alias });
+    }
+    Ok(alias)
 }
 
 fn parse_hash(input: &str) -> Result<[u8; 32], CliError> {
@@ -986,6 +1190,7 @@ mod tests {
         assert!(help.contains("send"));
         assert!(help.contains("conversations"));
         assert!(help.contains("history"));
+        assert!(help.contains("contact"));
 
         let mut command = Cli::command_for_help();
         let discover = command
@@ -1050,6 +1255,32 @@ mod tests {
             cli.command(),
             CliCommand::History(HistoryArgs {
                 conversation: "11111111-1111-4111-8111-111111111111".to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn parses_contact_add_subcommand() {
+        let cli = Cli::parse_from([
+            "decentra-chat",
+            "--config",
+            "config.toml",
+            "contact",
+            "add",
+            "--alias",
+            "alice",
+            "--fingerprint",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ]);
+
+        assert_eq!(
+            cli.command(),
+            CliCommand::Contact(ContactArgs {
+                command: ContactCommand::Add(ContactAddArgs {
+                    alias: "alice".to_owned(),
+                    fingerprint: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                        .to_owned(),
+                }),
             })
         );
     }
@@ -1263,6 +1494,135 @@ storage_path = "{}"
         assert!(output.contains("conversations: 1"));
         assert!(output.contains("conversation_uuid\tcreated_at\tupdated_at"));
         assert!(output.contains("11111111111141118111111111111111"));
+    }
+
+    #[test]
+    fn contact_commands_add_list_show_and_trust() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage_path = dir.path().join("chat.sqlite3");
+        let config_path = write_config(dir.path(), "config.toml", &storage_path);
+        let fingerprint = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+        let mut add_output = Vec::new();
+        run_from(
+            [
+                "decentra-chat",
+                "--config",
+                config_path.to_str().expect("utf-8 path"),
+                "contact",
+                "add",
+                "--alias",
+                "alice",
+                "--fingerprint",
+                fingerprint,
+            ],
+            &mut add_output,
+        )
+        .expect("add contact");
+        let add_output = String::from_utf8(add_output).expect("output is UTF-8");
+        assert!(add_output.contains("contact: stored alias=alice"));
+        assert!(add_output.contains("\tfalse\tuntrusted\t"));
+
+        let mut trust_output = Vec::new();
+        run_from(
+            [
+                "decentra-chat",
+                "--config",
+                config_path.to_str().expect("utf-8 path"),
+                "contact",
+                "trust",
+                "alice",
+            ],
+            &mut trust_output,
+        )
+        .expect("trust contact");
+        let trust_output = String::from_utf8(trust_output).expect("output is UTF-8");
+        assert!(trust_output.contains("contact: trusted alias=alice"));
+        assert!(trust_output.contains("\tfalse\ttrusted\t"));
+
+        let mut list_output = Vec::new();
+        run_from(
+            [
+                "decentra-chat",
+                "--config",
+                config_path.to_str().expect("utf-8 path"),
+                "contact",
+                "list",
+            ],
+            &mut list_output,
+        )
+        .expect("list contacts");
+        let list_output = String::from_utf8(list_output).expect("output is UTF-8");
+        assert!(list_output.contains("contacts: 1"));
+        assert!(list_output.contains("alias\tfingerprint\tpublic_key_present\ttrust_state"));
+        assert!(list_output.contains(&format!("alice\t{fingerprint}\tfalse\ttrusted")));
+
+        let mut show_output = Vec::new();
+        run_from(
+            [
+                "decentra-chat",
+                "--config",
+                config_path.to_str().expect("utf-8 path"),
+                "contact",
+                "show",
+                fingerprint,
+            ],
+            &mut show_output,
+        )
+        .expect("show contact");
+        let show_output = String::from_utf8(show_output).expect("output is UTF-8");
+        assert!(show_output.contains("contact: alias=alice"));
+        assert!(show_output.contains(&format!("alice\t{fingerprint}\tfalse\ttrusted")));
+    }
+
+    #[test]
+    fn contact_alias_conflict_is_actionable() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage_path = dir.path().join("chat.sqlite3");
+        let config_path = write_config(dir.path(), "config.toml", &storage_path);
+        let mut output = Vec::new();
+        run_from(
+            [
+                "decentra-chat",
+                "--config",
+                config_path.to_str().expect("utf-8 path"),
+                "contact",
+                "add",
+                "--alias",
+                "alice",
+                "--fingerprint",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ],
+            &mut output,
+        )
+        .expect("add first contact");
+
+        let error = run_from(
+            [
+                "decentra-chat",
+                "--config",
+                config_path.to_str().expect("utf-8 path"),
+                "contact",
+                "add",
+                "--alias",
+                "ALICE",
+                "--fingerprint",
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            ],
+            Vec::new(),
+        )
+        .expect_err("alias conflict");
+
+        assert!(error.to_string().contains("already belongs to fingerprint"));
+    }
+
+    #[test]
+    fn invalid_contact_inputs_are_actionable() {
+        let error = validate_cli_contact_alias(" alice ".to_owned()).expect_err("invalid alias");
+        assert!(error.to_string().contains("without tabs, newlines"));
+
+        let error = parse_fingerprint("not-hex").expect_err("invalid fingerprint");
+        assert!(error.to_string().contains("64 hex characters"));
     }
 
     #[test]
