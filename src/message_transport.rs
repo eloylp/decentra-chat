@@ -363,7 +363,7 @@ async fn handle_connection(
     let message = read_message(&mut stream).await?;
     let Message::ChatMessage(message) = message else {
         return Err(ChatTransportError::UnexpectedMessage {
-            received: message_name(&message),
+            received: message.name(),
         });
     };
 
@@ -462,7 +462,7 @@ async fn read_message_ack(
     let message = read_message(stream).await?;
     let Message::MessageAck(ack) = message else {
         return Err(ChatTransportError::UnexpectedMessage {
-            received: message_name(&message),
+            received: message.name(),
         });
     };
 
@@ -613,16 +613,6 @@ fn unix_timestamp() -> Result<i64, ChatTransportError> {
         .duration_since(UNIX_EPOCH)
         .map_err(|_| ChatTransportError::InvalidSystemTime)?;
     i64::try_from(duration.as_secs()).map_err(|_| ChatTransportError::InvalidSystemTime)
-}
-
-fn message_name(message: &Message) -> &'static str {
-    match message {
-        Message::DiscoveryAnnounce(_) => "discovery announce",
-        Message::KeyExchangeReq(_) => "key-exchange request",
-        Message::KeyExchangeResp(_) => "key-exchange response",
-        Message::ChatMessage(_) => "chat message",
-        Message::MessageAck(_) => "message ack",
-    }
 }
 
 #[cfg(test)]

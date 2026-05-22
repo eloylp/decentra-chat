@@ -142,7 +142,7 @@ pub async fn request_peer_key(
     let response = read_message(&mut stream).await?;
     let Message::KeyExchangeResp(response) = response else {
         return Err(KeyExchangeError::UnexpectedResponse {
-            received: message_name(&response),
+            received: response.name(),
         });
     };
 
@@ -175,7 +175,7 @@ async fn handle_connection(
     let request = read_message(&mut stream).await?;
     let Message::KeyExchangeReq(_request) = request else {
         return Err(KeyExchangeError::UnexpectedRequest {
-            received: message_name(&request),
+            received: request.name(),
         });
     };
 
@@ -267,16 +267,6 @@ async fn write_message(stream: &mut TcpStream, message: Message) -> Result<(), K
         operation: "flushing frame",
         source,
     })
-}
-
-fn message_name(message: &Message) -> &'static str {
-    match message {
-        Message::DiscoveryAnnounce(_) => "discovery announce",
-        Message::KeyExchangeReq(_) => "key-exchange request",
-        Message::KeyExchangeResp(_) => "key-exchange response",
-        Message::ChatMessage(_) => "chat message",
-        Message::MessageAck(_) => "message ack",
-    }
 }
 
 fn unix_timestamp() -> Result<i64, KeyExchangeError> {
