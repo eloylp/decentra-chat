@@ -1,5 +1,6 @@
 use std::{
     fs,
+    io::Write,
     net::TcpListener,
     path::{Path, PathBuf},
     process::{Child, Command, Output, Stdio},
@@ -455,6 +456,180 @@ fn key_exchange_send_ack_and_history_work_through_public_cli() {
     assert!(history_stdout.contains("\tnone\thello bob from the cli"), "{history_stdout}");
 }
 
+#[test]
+fn bounded_chat_session_sends_two_messages_and_records_acknowledged_history() {
+    let fixture = TestFixture::new("chat-session");
+    let alice_storage = fixture.path("alice.sqlite3");
+    let bob_storage = fixture.path("bob.sqlite3");
+    let alice_config =
+        fixture.write_config("alice.toml", fixture.unique_udp_port(), &alice_storage);
+    let bob_config = fixture.write_config("bob.toml", fixture.unique_udp_port(), &bob_storage);
+    let alice_secret = fixture.path("alice.secret");
+    let alice_public = fixture.path("alice.public");
+    let bob_secret = fixture.path("bob.secret");
+    let bob_public = fixture.path("bob.public");
+
+    let alice_keygen = fixture.cli(
+        [
+            "keygen",
+            "--secret-key",
+            path_arg(&alice_secret),
+            "--public-key",
+            path_arg(&alice_public),
+        ],
+        "alice keygen for chat session",
+    );
+    assert_success(&alice_keygen, "alice keygen for chat session");
+    let bob_keygen = fixture.cli(
+        [
+            "keygen",
+            "--secret-key",
+            path_arg(&bob_secret),
+            "--public-key",
+            path_arg(&bob_public),
+        ],
+        "bob keygen for chat session",
+    );
+    assert_success(&bob_keygen, "bob keygen for chat session");
+    let alice_fingerprint = fingerprint_from_keygen(&stdout(&alice_keygen));
+    let bob_fingerprint = fingerprint_from_keygen(&stdout(&bob_keygen));
+
+    let bob_key_addr = format!("127.0.0.1:{}", free_tcp_port());
+    let mut bob_key_server = fixture.spawn_cli(
+        [
+            "key-serve",
+            "--public-key",
+            path_arg(&bob_public),
+            "--listen",
+            bob_key_addr.as_str(),
+            "--duration-ms",
+            "10000",
+        ],
+        "bob key-serve for chat session",
+    );
+    let alice_request = fixture.eventually_cli(
+        [
+            "--config",
+            path_arg(&alice_config),
+            "onboard",
+            "--alias",
+            "bob",
+            "--fingerprint",
+            bob_fingerprint.as_str(),
+            "--peer",
+            bob_key_addr.as_str(),
+            "--trust",
+        ],
+        "alice onboard bob for chat session",
+    );
+    assert_success(&alice_request, "alice onboard bob for chat session");
+    bob_key_server.kill_and_wait();
+
+    let alice_key_addr = format!("127.0.0.1:{}", free_tcp_port());
+    let mut alice_key_server = fixture.spawn_cli(
+        [
+            "key-serve",
+            "--public-key",
+            path_arg(&alice_public),
+            "--listen",
+            alice_key_addr.as_str(),
+            "--duration-ms",
+            "10000",
+        ],
+        "alice key-serve for chat session",
+    );
+    let bob_request = fixture.eventually_cli(
+        [
+            "--config",
+            path_arg(&bob_config),
+            "onboard",
+            "--alias",
+            "alice",
+            "--fingerprint",
+            alice_fingerprint.as_str(),
+            "--peer",
+            alice_key_addr.as_str(),
+            "--trust",
+        ],
+        "bob onboard alice for chat session",
+    );
+    assert_success(&bob_request, "bob onboard alice for chat session");
+    alice_key_server.kill_and_wait();
+
+    let conversation = "11111111-1111-4111-8111-111111111111";
+    let alice_chat_addr = format!("127.0.0.1:{}", free_tcp_port());
+    let bob_chat_addr = format!("127.0.0.1:{}", free_tcp_port());
+    let mut bob_chat = fixture.spawn_cli_with_closed_stdin(
+        [
+            "--config",
+            path_arg(&bob_config),
+            "chat",
+            "--secret-key",
+            path_arg(&bob_secret),
+            "--contact",
+            "alice",
+            "--peer",
+            alice_chat_addr.as_str(),
+            "--listen",
+            bob_chat_addr.as_str(),
+            "--conversation",
+            conversation,
+            "--duration-ms",
+            "3000",
+        ],
+        "bob chat session",
+    );
+
+    let alice_chat = fixture.eventually_cli_with_stdin(
+        [
+            "--config",
+            path_arg(&alice_config),
+            "chat",
+            "--secret-key",
+            path_arg(&alice_secret),
+            "--contact",
+            "bob",
+            "--peer",
+            bob_chat_addr.as_str(),
+            "--listen",
+            alice_chat_addr.as_str(),
+            "--conversation",
+            conversation,
+            "--duration-ms",
+            "500",
+        ],
+        "first chat line\nsecond chat line\n",
+        "alice chat session",
+    );
+    assert_success(&alice_chat, "alice chat session");
+    let bob_output = bob_chat.wait_with_timeout(CLI_TIMEOUT);
+    assert_success(&bob_output, "bob chat session");
+
+    let alice_stdout = stdout(&alice_chat);
+    let bob_stdout = stdout(&bob_output);
+    assert!(alice_stdout.contains("chat: delivered"), "{alice_stdout}");
+    assert!(alice_stdout.contains("chat: stopped sent=2"), "{alice_stdout}");
+    assert!(bob_stdout.contains("chat: received"), "{bob_stdout}");
+    assert!(bob_stdout.contains("chat: stopped sent=0 received=2"), "{bob_stdout}");
+
+    let history = fixture.cli(
+        [
+            "--config",
+            path_arg(&alice_config),
+            "history",
+            "--conversation",
+            conversation,
+        ],
+        "alice chat session history",
+    );
+    assert_success(&history, "alice chat session history");
+    let history_stdout = stdout(&history);
+    assert!(history_stdout.contains("messages=2"), "{history_stdout}");
+    assert!(history_stdout.contains("acknowledged:"), "{history_stdout}");
+    assert!(history_stdout.contains("\tnone\tfirst chat line"), "{history_stdout}");
+    assert!(history_stdout.contains("\tnone\tsecond chat line"), "{history_stdout}");
+}
+
 struct TestFixture {
     root: tempfile::TempDir,
 }
@@ -519,6 +694,32 @@ storage_path = "{}"
         );
     }
 
+    fn eventually_cli_with_stdin<const N: usize>(
+        &self,
+        args: [&str; N],
+        stdin: &str,
+        description: &str,
+    ) -> Output {
+        let deadline = Instant::now() + BACKGROUND_READY_TIMEOUT;
+        let mut last_output = None;
+        while Instant::now() < deadline {
+            let output = run_cli_with_stdin(args, Some(stdin), CLI_TIMEOUT, description);
+            if output.status.success() {
+                return output;
+            }
+            last_output = Some(output);
+            thread::sleep(Duration::from_millis(100));
+        }
+
+        let output = last_output.expect("command was attempted at least once");
+        panic!(
+            "{description} did not succeed before timeout\nstatus: {}\nstdout:\n{}\nstderr:\n{}",
+            output.status,
+            stdout(&output),
+            stderr(&output)
+        );
+    }
+
     fn spawn_cli<const N: usize>(
         &self,
         args: [&str; N],
@@ -531,6 +732,27 @@ storage_path = "{}"
             .stderr(Stdio::piped())
             .spawn()
             .expect("spawn CLI process");
+        ChildGuard {
+            child: Some(child),
+            description,
+            args: args.map(str::to_owned).to_vec(),
+        }
+    }
+
+    fn spawn_cli_with_closed_stdin<const N: usize>(
+        &self,
+        args: [&str; N],
+        description: &'static str,
+    ) -> ChildGuard {
+        let mut child = Command::new(cli_bin())
+            .args(args)
+            .current_dir(self.root.path())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn CLI process");
+        drop(child.stdin.take());
         ChildGuard {
             child: Some(child),
             description,
@@ -592,12 +814,28 @@ impl Drop for ChildGuard {
 }
 
 fn run_cli<const N: usize>(args: [&str; N], timeout: Duration, description: &str) -> Output {
+    run_cli_with_stdin(args, None, timeout, description)
+}
+
+fn run_cli_with_stdin<const N: usize>(
+    args: [&str; N],
+    stdin: Option<&str>,
+    timeout: Duration,
+    description: &str,
+) -> Output {
     let mut child = Command::new(cli_bin())
         .args(args)
+        .stdin(stdin.map_or(Stdio::null(), |_| Stdio::piped()))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn CLI command");
+    if let Some(input) = stdin {
+        let mut child_stdin = child.stdin.take().expect("stdin is piped");
+        child_stdin
+            .write_all(input.as_bytes())
+            .expect("write CLI stdin");
+    }
     let deadline = Instant::now() + timeout;
 
     loop {

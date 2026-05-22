@@ -9,13 +9,14 @@ use rand::RngCore;
 use sha2::{Digest, Sha256};
 use std::{
     net::SocketAddr,
+    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 use thiserror::Error;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
-    sync::mpsc,
+    sync::{mpsc, Mutex},
     task::{JoinHandle, JoinSet},
 };
 
@@ -166,8 +167,16 @@ impl ChatMessageService {
             .map_err(ChatTransportError::LocalAddr)?;
         let (accepted_tx, accepted_rx) = mpsc::channel(16);
 
+        let expected_previous_hash = Arc::new(Mutex::new(expected_previous_hash));
         let task = tokio::spawn(async move {
-            listener_loop(listener, local, peer, expected_previous_hash, accepted_tx).await;
+            listener_loop(
+                listener,
+                local,
+                peer,
+                expected_previous_hash,
+                accepted_tx,
+            )
+            .await;
         });
 
         Ok(Self {
@@ -317,7 +326,7 @@ async fn listener_loop(
     listener: TcpListener,
     local: LocalChatIdentity,
     peer: PeerChatIdentity,
-    expected_previous_hash: [u8; 32],
+    expected_previous_hash: Arc<Mutex<[u8; 32]>>,
     accepted_tx: mpsc::Sender<ReceivedChatMessage>,
 ) {
     let mut connections = JoinSet::new();
@@ -331,6 +340,7 @@ async fn listener_loop(
                 let local = local.clone();
                 let peer = peer.clone();
                 let accepted_tx = accepted_tx.clone();
+                let expected_previous_hash = Arc::clone(&expected_previous_hash);
                 connections.spawn(async move {
                     if let Ok(message) =
                         handle_connection(stream, &local, &peer, expected_previous_hash).await
@@ -348,7 +358,7 @@ async fn handle_connection(
     mut stream: TcpStream,
     local: &LocalChatIdentity,
     peer: &PeerChatIdentity,
-    expected_previous_hash: [u8; 32],
+    expected_previous_hash: Arc<Mutex<[u8; 32]>>,
 ) -> Result<ReceivedChatMessage, ChatTransportError> {
     let message = read_message(&mut stream).await?;
     let Message::ChatMessage(message) = message else {
@@ -357,7 +367,11 @@ async fn handle_connection(
         });
     };
 
-    let accepted = accept_chat_message(message, local, peer, expected_previous_hash)?;
+    let mut expected = expected_previous_hash.lock().await;
+    let accepted = accept_chat_message(message, local, peer, *expected)?;
+    *expected = accepted.message_hash;
+    drop(expected);
+
     let ack = build_message_ack(&accepted, local)?;
     write_message(&mut stream, Message::MessageAck(ack)).await?;
 

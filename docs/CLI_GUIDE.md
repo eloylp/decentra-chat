@@ -2,8 +2,8 @@
 
 The DecentraChat CLI is the current user-facing client. It can inspect local
 configuration, initialize storage, manage local contacts, run bounded LAN
-discovery, exchange public keys, send and receive one encrypted message, and
-read conversation history from SQLite.
+discovery, exchange public keys, send and receive encrypted messages, run a
+bounded stdin-driven chat session, and read conversation history from SQLite.
 
 The commands below describe what is implemented in `src/cli.rs` today. There is
 no TUI or long-running chat daemon yet.
@@ -228,9 +228,9 @@ silently replacing an existing pin.
 ## Contact Book and Trust
 
 Contacts are local aliases pinned to peer fingerprints in the configured SQLite
-store. They do not replace raw fingerprint workflows yet; `key-request`, `send`,
-`receive`, `conversations`, and `history` still accept the same fingerprint
-arguments as before.
+store. `chat` requires a trusted contact with a stored public key. The lower
+level `key-request`, `send`, `receive`, `conversations`, and `history`
+commands still accept the same fingerprint arguments as before.
 
 Add or update an alias for a fingerprint:
 
@@ -298,6 +298,28 @@ cargo run -- --config ./alice.toml send \
 When `--conversation` is omitted, `send` creates a new UUID v4. Use
 `--previous-hash` when appending to an existing message chain. The default
 previous hash is the zero hash, which starts a chain segment.
+
+## Bounded Chat Session
+
+`chat` opens one conversation with one trusted contact. It prints the current
+conversation history, listens for inbound messages until `--duration-ms`
+expires, and sends each non-empty stdin line through the same encrypted TCP path
+used by `send`. Sent messages are persisted with their ACK state, and received
+messages are persisted for later history reads.
+
+```sh
+printf 'first message\nsecond message\n' | cargo run -- --config ./alice.toml chat \
+  --secret-key ./alice.secret \
+  --contact bob \
+  --peer 127.0.0.1:52003 \
+  --listen 127.0.0.1:52004 \
+  --conversation 11111111-1111-4111-8111-111111111111 \
+  --duration-ms 30000
+```
+
+For loopback testing, start the peer's `chat` command first with the opposite
+`--peer` and `--listen` addresses. Close stdin on a receive-only session; it
+will continue polling inbound messages until the bounded duration expires.
 
 ## Delivery State and History
 
