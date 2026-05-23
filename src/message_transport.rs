@@ -3,15 +3,12 @@ use crate::{
     crypto,
     discovery::Fingerprint,
     storage::{MessageAckUpsert, Storage, StorageError},
+    time,
 };
 use pgp::composed::{SignedPublicKey, SignedSecretKey};
 use rand::RngCore;
 use sha2::{Digest, Sha256};
-use std::{
-    net::SocketAddr,
-    sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::{net::SocketAddr, sync::Arc};
 use thiserror::Error;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -609,10 +606,7 @@ fn unix_timestamp_u32() -> Result<u32, ChatTransportError> {
 }
 
 fn unix_timestamp() -> Result<i64, ChatTransportError> {
-    let duration = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| ChatTransportError::InvalidSystemTime)?;
-    i64::try_from(duration.as_secs()).map_err(|_| ChatTransportError::InvalidSystemTime)
+    time::unix_timestamp_secs().map_err(|_| ChatTransportError::InvalidSystemTime)
 }
 
 #[cfg(test)]
