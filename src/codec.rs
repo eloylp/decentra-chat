@@ -1,6 +1,6 @@
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
-use std::fmt;
 use std::io::{self, Cursor, Read};
+use thiserror::Error;
 
 pub const TYPE_DISCOVERY_ANNOUNCE: u8 = 1;
 pub const TYPE_KEY_EXCHANGE_REQ: u8 = 2;
@@ -8,22 +8,13 @@ pub const TYPE_KEY_EXCHANGE_RESP: u8 = 3;
 pub const TYPE_CHAT_MESSAGE: u8 = 4;
 pub const TYPE_MESSAGE_ACK: u8 = 5;
 
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone, Error)]
 pub enum CodecError {
+    #[error("unexpected end of DC wire message")]
     UnexpectedEof,
+    #[error("unknown DC message type id {0}")]
     UnknownTypeId(u8),
 }
-
-impl fmt::Display for CodecError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::UnexpectedEof => write!(f, "unexpected end of DC wire message"),
-            Self::UnknownTypeId(type_id) => write!(f, "unknown DC message type id {type_id}"),
-        }
-    }
-}
-
-impl std::error::Error for CodecError {}
 
 impl From<io::Error> for CodecError {
     fn from(_: io::Error) -> Self {
@@ -443,6 +434,24 @@ mod tests {
 
         for (message, expected_name) in cases {
             assert_eq!(message.name(), expected_name);
+        }
+    }
+
+    #[test]
+    fn codec_error_display_strings_are_stable() {
+        let cases = [
+            (
+                CodecError::UnexpectedEof,
+                "unexpected end of DC wire message",
+            ),
+            (
+                CodecError::UnknownTypeId(0xff),
+                "unknown DC message type id 255",
+            ),
+        ];
+
+        for (error, expected) in cases {
+            assert_eq!(error.to_string(), expected);
         }
     }
 
