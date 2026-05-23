@@ -1,4 +1,4 @@
-use crate::{discovery::Fingerprint, time};
+use crate::{discovery::Fingerprint, hex, time};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::{
     collections::{HashMap, HashSet},
@@ -998,50 +998,11 @@ fn reply_reference_from_headers(headers: &[u8]) -> Option<ReplyReference> {
 }
 
 fn parse_uuid(input: &str) -> Option<[u8; 16]> {
-    let mut hex = String::with_capacity(32);
-    for byte in input.bytes() {
-        if byte == b'-' {
-            continue;
-        }
-        hex.push(byte as char);
-    }
-    if hex.len() != 32 {
-        return None;
-    }
-
-    let mut out = [0; 16];
-    for (index, chunk) in hex.as_bytes().chunks_exact(2).enumerate() {
-        out[index] = parse_hex_byte(chunk)?;
-    }
-    Some(out)
+    hex::parse_hyphenated_fixed_hex(input, "expected 32 hex characters").ok()
 }
 
 fn parse_hash(input: &str) -> Option<[u8; 32]> {
-    if input.len() != 64 {
-        return None;
-    }
-
-    let mut out = [0; 32];
-    for (index, chunk) in input.as_bytes().chunks_exact(2).enumerate() {
-        out[index] = parse_hex_byte(chunk)?;
-    }
-    Some(out)
-}
-
-fn parse_hex_byte(input: &[u8]) -> Option<u8> {
-    let [high, low] = input else {
-        return None;
-    };
-    Some(hex_value(*high)? << 4 | hex_value(*low)?)
-}
-
-fn hex_value(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
-    }
+    hex::parse_fixed_hex(input).ok()
 }
 
 fn order_message_chain(
@@ -1138,20 +1099,7 @@ fn unix_timestamp() -> Result<i64, StorageError> {
 }
 
 fn fingerprint_hex(fingerprint: &Fingerprint) -> String {
-    let mut output = String::with_capacity(64);
-    for byte in fingerprint {
-        output.push(nibble_hex(byte >> 4));
-        output.push(nibble_hex(byte & 0x0f));
-    }
-    output
-}
-
-fn nibble_hex(value: u8) -> char {
-    match value {
-        0..=9 => (b'0' + value) as char,
-        10..=15 => (b'a' + value - 10) as char,
-        _ => unreachable!("nibble value is always <= 15"),
-    }
+    hex::lower_hex(fingerprint)
 }
 
 #[cfg(test)]
