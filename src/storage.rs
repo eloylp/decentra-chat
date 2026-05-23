@@ -1,10 +1,9 @@
-use crate::discovery::Fingerprint;
+use crate::{discovery::Fingerprint, time};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::{
     collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
 };
 use thiserror::Error;
 
@@ -1135,10 +1134,7 @@ fn vec_to_fingerprint(bytes: Vec<u8>) -> Result<Fingerprint, StorageError> {
 }
 
 fn unix_timestamp() -> Result<i64, StorageError> {
-    let duration = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| StorageError::InvalidSystemTime)?;
-    i64::try_from(duration.as_secs()).map_err(|_| StorageError::InvalidSystemTime)
+    time::unix_timestamp_secs().map_err(|_| StorageError::InvalidSystemTime)
 }
 
 fn fingerprint_hex(fingerprint: &Fingerprint) -> String {

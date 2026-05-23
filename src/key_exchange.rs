@@ -3,11 +3,9 @@ use crate::{
     crypto,
     discovery::Fingerprint,
     storage::{PeerKeyRecord, PeerKeyUpsert, Storage, StorageError},
+    time,
 };
-use std::{
-    net::SocketAddr,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::net::SocketAddr;
 use thiserror::Error;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -270,10 +268,7 @@ async fn write_message(stream: &mut TcpStream, message: Message) -> Result<(), K
 }
 
 fn unix_timestamp() -> Result<i64, KeyExchangeError> {
-    let duration = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| KeyExchangeError::InvalidSystemTime)?;
-    i64::try_from(duration.as_secs()).map_err(|_| KeyExchangeError::InvalidSystemTime)
+    time::unix_timestamp_secs().map_err(|_| KeyExchangeError::InvalidSystemTime)
 }
 
 #[cfg(test)]
