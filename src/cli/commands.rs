@@ -2,7 +2,7 @@ use super::{
     args::*,
     output::{write_contact, write_contact_header, write_history_message, write_peer_list},
     parse::{
-        fingerprint_hex, hex_value, load_local_identity, load_peer_identity,
+        fingerprint_hex, load_local_identity, load_peer_identity,
         load_peer_identity_from_fingerprint, open_storage, parse_fingerprint, parse_hash,
         parse_uuid, read_file, require_ipv4, uuid_hex, validate_cli_contact_alias, write_file,
     },
@@ -609,14 +609,15 @@ pub(super) fn run_contact_trust<W: Write>(
 }
 
 fn find_contact(storage: &Storage, query: &str) -> Result<ContactRecord, CliError> {
-    if query.len() == 64 && query.bytes().all(|byte| hex_value(byte).is_some()) {
-        let fingerprint = parse_fingerprint(query)?;
-        return storage
-            .get_contact_by_fingerprint(fingerprint)
-            .map_err(CliError::ReadContacts)?
-            .ok_or_else(|| CliError::MissingContact {
-                query: query.to_owned(),
-            });
+    if query.len() == 64 {
+        if let Ok(fingerprint) = parse_fingerprint(query) {
+            return storage
+                .get_contact_by_fingerprint(fingerprint)
+                .map_err(CliError::ReadContacts)?
+                .ok_or_else(|| CliError::MissingContact {
+                    query: query.to_owned(),
+                });
+        }
     }
 
     validate_cli_contact_alias(query.to_owned())?;
