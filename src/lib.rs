@@ -8,3 +8,4 @@ pub mod key_exchange;
 pub mod message_transport;
 pub mod storage;
 mod time;
+mod uuid;

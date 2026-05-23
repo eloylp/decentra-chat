@@ -5,9 +5,9 @@ use crate::{
     discovery::Fingerprint,
     message_transport::{LocalChatIdentity, PeerChatIdentity},
     storage::Storage,
+    uuid,
 };
 use pgp::composed::SignedSecretKey;
-use rand::RngCore;
 use std::{
     fs,
     io::Write,
@@ -68,7 +68,7 @@ pub(super) fn parse_uuid(input: &str) -> Result<[u8; 16], CliError> {
     }
 
     let uuid = parse_fixed_hex::<16>(&hex).map_err(CliError::InvalidConversationUuid)?;
-    if !is_uuid_v4(&uuid) {
+    if !uuid::is_uuid_v4(&uuid) {
         return Err(CliError::InvalidConversationUuid(
             "expected a non-zero UUID v4".to_owned(),
         ));
@@ -167,20 +167,6 @@ pub(super) fn write_file(path: &PathBuf, bytes: &[u8]) -> Result<(), CliError> {
         path: path.clone(),
         source,
     })
-}
-
-pub(super) fn new_uuid_v4() -> [u8; 16] {
-    let mut bytes = [0_u8; 16];
-    rand::thread_rng().fill_bytes(&mut bytes);
-    bytes[6] = (bytes[6] & 0x0f) | 0x40;
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    bytes
-}
-
-fn is_uuid_v4(bytes: &[u8; 16]) -> bool {
-    bytes.iter().any(|byte| *byte != 0)
-        && bytes[6] & 0xf0 == 0x40
-        && bytes[8] & 0xc0 == 0x80
 }
 
 pub(super) fn hex_value(byte: u8) -> Option<u8> {

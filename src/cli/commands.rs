@@ -3,9 +3,8 @@ use super::{
     output::{write_contact, write_contact_header, write_history_message, write_peer_list},
     parse::{
         fingerprint_hex, hex_value, load_local_identity, load_peer_identity,
-        load_peer_identity_from_fingerprint, new_uuid_v4, open_storage, parse_fingerprint,
-        parse_hash, parse_uuid, read_file, require_ipv4, uuid_hex, validate_cli_contact_alias,
-        write_file,
+        load_peer_identity_from_fingerprint, open_storage, parse_fingerprint, parse_hash,
+        parse_uuid, read_file, require_ipv4, uuid_hex, validate_cli_contact_alias, write_file,
     },
     CliError,
 };
@@ -17,6 +16,7 @@ use crate::{
     key_exchange::{self, KeyExchangeService, LocalKeyMaterial},
     message_transport::{self, ChatMessageService, OutgoingChatMessage},
     storage::{AcceptedChatMessageInsert, ContactRecord, ContactTrustState, ContactUpsert, Storage},
+    uuid::new_uuid_v4,
 };
 use std::{
     io::Write,
