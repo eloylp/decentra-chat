@@ -34,29 +34,7 @@ pub(super) fn require_ipv4(field: &'static str, value: IpAddr) -> Result<Ipv4Add
 }
 
 pub(super) fn parse_fingerprint(input: &str) -> Result<Fingerprint, CliError> {
-    if input.len() != 64 {
-        return Err(CliError::InvalidFingerprint(
-            "expected exactly 64 hex characters".to_owned(),
-        ));
-    }
-
-    let mut fingerprint = [0_u8; 32];
-    for (index, chunk) in input.as_bytes().chunks_exact(2).enumerate() {
-        let high = hex_value(chunk[0]).ok_or_else(|| {
-            CliError::InvalidFingerprint(format!(
-                "invalid hex character at byte {}",
-                index * 2
-            ))
-        })?;
-        let low = hex_value(chunk[1]).ok_or_else(|| {
-            CliError::InvalidFingerprint(format!(
-                "invalid hex character at byte {}",
-                index * 2 + 1
-            ))
-        })?;
-        fingerprint[index] = (high << 4) | low;
-    }
-    Ok(fingerprint)
+    parse_fixed_hex::<32>(input).map_err(CliError::InvalidFingerprint)
 }
 
 pub(super) fn validate_cli_contact_alias(alias: String) -> Result<String, CliError> {
