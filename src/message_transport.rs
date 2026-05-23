@@ -4,9 +4,9 @@ use crate::{
     discovery::Fingerprint,
     storage::{MessageAckUpsert, Storage, StorageError},
     time,
+    uuid,
 };
 use pgp::composed::{SignedPublicKey, SignedSecretKey};
-use rand::RngCore;
 use sha2::{Digest, Sha256};
 use std::{net::SocketAddr, sync::Arc};
 use thiserror::Error;
@@ -288,7 +288,7 @@ fn build_chat_message(
     peer: &PeerChatIdentity,
     outgoing: OutgoingChatMessage,
 ) -> Result<ChatMessage, ChatTransportError> {
-    if !is_uuid_v4(&outgoing.conversation_uuid) {
+    if !uuid::is_uuid_v4(&outgoing.conversation_uuid) {
         return Err(ChatTransportError::InvalidConversationUuid);
     }
     if outgoing.headers.len() > u16::MAX as usize {
@@ -301,7 +301,7 @@ fn build_chat_message(
         .map_err(ChatTransportError::Encrypt)?;
     let mut message = ChatMessage {
         version: WIRE_CHAT_VERSION,
-        uuid: new_uuid_v4(),
+        uuid: uuid::new_uuid_v4(),
         conv_uuid: outgoing.conversation_uuid,
         conv_type: CONVERSATION_TYPE_DIRECT,
         prev_hash: outgoing.previous_hash,
@@ -391,10 +391,10 @@ fn validate_chat_message(
             conv_type: message.conv_type,
         });
     }
-    if !is_uuid_v4(&message.uuid) {
+    if !uuid::is_uuid_v4(&message.uuid) {
         return Err(ChatTransportError::InvalidMessageUuid);
     }
-    if !is_uuid_v4(&message.conv_uuid) {
+    if !uuid::is_uuid_v4(&message.conv_uuid) {
         return Err(ChatTransportError::InvalidConversationUuid);
     }
     if message.prev_hash != expected_previous_hash {
@@ -579,20 +579,6 @@ async fn write_message(
         operation: "flushing frame",
         source,
     })
-}
-
-fn new_uuid_v4() -> [u8; 16] {
-    let mut bytes = [0_u8; 16];
-    rand::thread_rng().fill_bytes(&mut bytes);
-    bytes[6] = (bytes[6] & 0x0f) | 0x40;
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    bytes
-}
-
-fn is_uuid_v4(bytes: &[u8; 16]) -> bool {
-    bytes.iter().any(|byte| *byte != 0)
-        && bytes[6] & 0xf0 == 0x40
-        && bytes[8] & 0xc0 == 0x80
 }
 
 fn timestamp_in_window(timestamp: u32) -> Result<bool, ChatTransportError> {
