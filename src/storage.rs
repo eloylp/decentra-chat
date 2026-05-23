@@ -1076,22 +1076,25 @@ fn storage_error_to_sql_error(error: StorageError) -> rusqlite::Error {
     )
 }
 
+fn vec_to_fixed_array<const N: usize>(
+    bytes: Vec<u8>,
+    invalid_length: impl FnOnce(usize) -> StorageError,
+) -> Result<[u8; N], StorageError> {
+    bytes
+        .try_into()
+        .map_err(|bytes: Vec<u8>| invalid_length(bytes.len()))
+}
+
 fn vec_to_message_uuid(bytes: Vec<u8>) -> Result<[u8; 16], StorageError> {
-    bytes.try_into().map_err(|bytes: Vec<u8>| {
-        StorageError::InvalidMessageUuidLength { len: bytes.len() }
-    })
+    vec_to_fixed_array(bytes, |len| StorageError::InvalidMessageUuidLength { len })
 }
 
 fn vec_to_message_hash(bytes: Vec<u8>) -> Result<[u8; 32], StorageError> {
-    bytes.try_into().map_err(|bytes: Vec<u8>| {
-        StorageError::InvalidMessageHashLength { len: bytes.len() }
-    })
+    vec_to_fixed_array(bytes, |len| StorageError::InvalidMessageHashLength { len })
 }
 
 fn vec_to_fingerprint(bytes: Vec<u8>) -> Result<Fingerprint, StorageError> {
-    bytes
-        .try_into()
-        .map_err(|bytes: Vec<u8>| StorageError::InvalidFingerprintLength { len: bytes.len() })
+    vec_to_fixed_array(bytes, |len| StorageError::InvalidFingerprintLength { len })
 }
 
 fn unix_timestamp() -> Result<i64, StorageError> {
